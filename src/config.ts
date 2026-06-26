@@ -1,5 +1,6 @@
 import { routing } from "./routing.js";
 import { normalizeLogger } from "./logger.js";
+import { normalizeUserAgent } from "./user-agent.js";
 import type {
   AlternatorConnectionOptions,
   AlternatorDynamoDBClientConfig,
@@ -45,6 +46,7 @@ export function normalizeConfig(input: AlternatorDynamoDBClientConfig): Normaliz
   const noAuth = input.credentials === undefined;
   const compression = normalizeCompression(input.compression);
   const headerOptimization = normalizeHeaderOptimization(input.headerOptimization, noAuth);
+  const userAgent = normalizeUserAgent(input.userAgent);
   const keyRouteAffinity = normalizeKeyRouteAffinity(input.keyRouteAffinity);
   const discovery = normalizeDiscovery(input.discovery, runtime);
   const connection = input.connection ? normalizeConnection(input.connection) : undefined;
@@ -57,6 +59,7 @@ export function normalizeConfig(input: AlternatorDynamoDBClientConfig): Normaliz
     runtime,
     compression,
     headerOptimization,
+    userAgent,
     keyRouteAffinity,
     discovery,
     ...(input.tls ? { tls: input.tls } : {}),

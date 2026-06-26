@@ -155,6 +155,8 @@ new AlternatorDynamoDBClient({
     allowedHeaders: ["Host", "X-Amz-Target", "Content-Length", "Accept-Encoding", "Content-Encoding"],
   },
 
+  userAgent: (userAgent) => `${userAgent} my-app/1.2.3`,
+
   keyRouteAffinity: {
     type: "any-write",
     partitionKeys: {
@@ -188,7 +190,36 @@ Header optimization is disabled by default. When enabled, headers are
 whitelisted, not removed by a strip list. The default
 whitelist is `Host`, `X-Amz-Target`, `Content-Length`, `Accept-Encoding`, and
 `Content-Encoding`; when credentials are configured, `Authorization` and
-`X-Amz-Date` are also kept.
+`X-Amz-Date` are also kept. The Alternator `User-Agent` is applied after this
+filter, so it is kept unless `userAgent: false` is configured.
+
+By default, the client replaces the AWS SDK `User-Agent` with the ScyllaDB
+Alternator client identity:
+
+```text
+scylladb-alternator-client-javascript/<version>
+```
+
+You can replace it completely:
+
+```ts
+new AlternatorDynamoDBClient({
+  seeds: ["scylla-0.internal"],
+  userAgent: "my-client/1.2.3",
+});
+```
+
+You can transform the generated value. The function receives the default
+ScyllaDB Alternator user-agent:
+
+```ts
+new AlternatorDynamoDBClient({
+  seeds: ["scylla-0.internal"],
+  userAgent: (userAgent) => `${userAgent} my-app/4.5.6`,
+});
+```
+
+Use `userAgent: false` to remove the header entirely.
 
 Request compression is disabled by default. When enabled, it compresses every
 request body with gzip. Use `gzipLevel` to select the zlib level, or provide

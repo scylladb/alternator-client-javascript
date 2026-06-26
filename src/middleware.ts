@@ -6,6 +6,7 @@ import type { AlternatorDiscovery } from "./discovery.js";
 import type { KeyRouteAffinityPlanner } from "./affinity.js";
 import type { AlternatorQueryPlan } from "./query-plan.js";
 import type { NormalizedAlternatorConfig } from "./types.js";
+import { applyUserAgent } from "./user-agent.js";
 
 const queryPlanKey = "__alternatorQueryPlan";
 
@@ -77,6 +78,8 @@ export function createAlternatorPostSigningMiddleware<Input extends object, Outp
         "x-amz-security-token",
       ]);
     }
+
+    request.headers = applyUserAgent(request.headers, config.userAgent);
 
     return next({
       ...args,

@@ -5,6 +5,7 @@ import type { RoutingRule } from "./routing.js";
 export type AlternatorScheme = "http" | "https";
 export type AlternatorRuntime = "node" | "edge";
 export type AlternatorKeyRouteAffinityType = "none" | "read-before-write" | "any-write";
+export type AlternatorUserAgentTransformer = (userAgent: string) => string | null | undefined;
 
 export interface AlternatorLogger {
   debug?: (...content: unknown[]) => void;
@@ -45,6 +46,18 @@ export interface AlternatorHeaderOptimizationOptions {
    */
   stripHeaders?: readonly string[];
 }
+
+export interface AlternatorUserAgentOptions {
+  enabled?: boolean;
+  value?: string;
+  transform?: AlternatorUserAgentTransformer;
+}
+
+export type AlternatorUserAgentConfig =
+  | boolean
+  | string
+  | AlternatorUserAgentTransformer
+  | AlternatorUserAgentOptions;
 
 export type AlternatorPartitionKeyByTable = Record<string, string>;
 
@@ -100,6 +113,7 @@ export interface AlternatorDynamoDBClientConfig extends BaseDynamoDBClientConfig
   requestHandler?: DynamoDBClientConfig["requestHandler"];
   compression?: boolean | AlternatorCompressionOptions;
   headerOptimization?: boolean | AlternatorHeaderOptimizationOptions;
+  userAgent?: AlternatorUserAgentConfig;
   keyRouteAffinity?: boolean | AlternatorKeyRouteAffinityOptions;
   tls?: AlternatorTlsOptions;
   discovery?: AlternatorDiscoveryOptions;
@@ -117,6 +131,10 @@ export interface NormalizedCompressionOptions {
 export interface NormalizedHeaderOptimizationOptions {
   readonly enabled: boolean;
   readonly allowedHeaders: readonly string[];
+}
+
+export interface NormalizedUserAgentOptions {
+  readonly value?: string;
 }
 
 export interface NormalizedKeyRouteAffinityOptions {
@@ -141,6 +159,7 @@ export interface NormalizedAlternatorConfig {
   readonly runtime: AlternatorRuntime;
   readonly compression: NormalizedCompressionOptions;
   readonly headerOptimization: NormalizedHeaderOptimizationOptions;
+  readonly userAgent: NormalizedUserAgentOptions;
   readonly keyRouteAffinity: NormalizedKeyRouteAffinityOptions;
   readonly discovery: NormalizedDiscoveryOptions;
   readonly tls?: AlternatorTlsOptions;
