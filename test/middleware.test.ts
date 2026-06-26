@@ -83,7 +83,7 @@ describe("Alternator middleware", () => {
     expect(request?.headers.authorization).toContain("Credential=key/");
   });
 
-  it("keeps whitelist auth headers when credentials and header optimization are enabled", async () => {
+  it("uses the Go-compatible optimized header whitelist with credentials", async () => {
     const handler = new RecordingHandler(() => ({ TableNames: [] }));
     const client = new AlternatorDynamoDBClient({
       seeds: ["seed"],
@@ -101,8 +101,21 @@ describe("Alternator middleware", () => {
     const headers = commandRequests(handler)[0]?.headers ?? {};
     expect(headers.authorization).toContain("AWS4-HMAC-SHA256");
     expect(headers["x-amz-date"]).toBeDefined();
-    expect(headers["x-amz-content-sha256"]).toBeUndefined();
+    expect(headers["x-amz-target"]).toBe("DynamoDB_20120810.ListTables");
+    expect(headers["content-length"]).toBeDefined();
+    expect(headers.host).toBe("seed:8080");
+    expect(headers["user-agent"]).toBe(alternatorUserAgentToken());
     expect(headers["content-type"]).toBeUndefined();
+    expect(headers["x-amz-content-sha256"]).toBeUndefined();
+    expect(headers["x-amz-user-agent"]).toBeUndefined();
+    expect(headers["amz-sdk-invocation-id"]).toBeUndefined();
+    expect(headers["amz-sdk-request"]).toBeUndefined();
+    expect(signedHeaderNames(headers.authorization)).toEqual([
+      "content-length",
+      "host",
+      "x-amz-date",
+      "x-amz-target",
+    ]);
   });
 
   it("compresses JSON request bodies when enabled", async () => {
@@ -257,3 +270,8 @@ describe("Alternator middleware", () => {
     expect(client.getPartitionKeyName("users")).toBe("id");
   });
 });
+
+function signedHeaderNames(authorization: string | undefined): string[] {
+  const match = authorization?.match(/(?:^|,\s*)SignedHeaders=([^,\s]+)/);
+  return match?.[1]?.split(";").filter(Boolean) ?? [];
+}

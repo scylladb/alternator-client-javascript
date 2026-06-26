@@ -51,6 +51,10 @@ export function createAlternatorRequestMiddleware<Input extends object, Output e
       request = await maybeCompressRequest(request, config);
     }
 
+    if (config.headerOptimization.enabled) {
+      request.headers = whitelistHeaders(request.headers, config.headerOptimization.allowedHeaders);
+    }
+
     return next({
       ...args,
       request,
