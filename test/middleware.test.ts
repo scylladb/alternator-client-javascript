@@ -64,6 +64,36 @@ describe("Alternator middleware", () => {
     expect(second?.hostname).toBe("node-b");
   });
 
+  it("continues retrying when maxAttempts exceeds the live node count", async () => {
+    let commandAttempts = 0;
+    const handler = new RecordingHandler((request) => {
+      if (request.path === "/localnodes") {
+        return ["node-a"];
+      }
+      commandAttempts += 1;
+      if (commandAttempts < 3) {
+        return jsonResponse({ __type: "InternalServerError", message: "retry" }, 500);
+      }
+      return { TableNames: [] };
+    });
+    const client = new AlternatorDynamoDBClient({
+      seeds: ["seed"],
+      requestHandler: handler,
+      discovery: { background: false },
+      maxAttempts: 3,
+    });
+
+    await client.refreshLiveNodes();
+    await client.send(new ListTablesCommand({}));
+
+    expect(commandAttempts).toBe(3);
+    expect(commandRequests(handler).map((request) => request.hostname)).toEqual([
+      "node-a",
+      "node-a",
+      "node-a",
+    ]);
+  });
+
   it("keeps SigV4 signing when credentials are provided", async () => {
     const handler = new RecordingHandler(() => ({ TableNames: [] }));
     const client = new AlternatorDynamoDBClient({

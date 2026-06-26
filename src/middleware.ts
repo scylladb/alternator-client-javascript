@@ -5,7 +5,7 @@ import { hostForUrl } from "./config.js";
 import type { AlternatorDiscovery } from "./discovery.js";
 import type { KeyRouteAffinityPlanner } from "./affinity.js";
 import type { AlternatorQueryPlan } from "./query-plan.js";
-import type { NormalizedAlternatorConfig } from "./types.js";
+import type { AlternatorNode, NormalizedAlternatorConfig } from "./types.js";
 import { applyUserAgent } from "./user-agent.js";
 
 const queryPlanKey = "__alternatorQueryPlan";
@@ -28,8 +28,7 @@ export function createAlternatorRequestMiddleware<Input extends object, Output e
 
     await discovery.refreshIfDue();
 
-    const plan = getOrCreateQueryPlan(context, args.input, discovery, keyAffinity);
-    const node = plan.next();
+    const node = nextNodeForAttempt(context, args.input, discovery, keyAffinity);
     if (!node) {
       throw new Error("Alternator query plan exhausted");
     }
@@ -92,23 +91,37 @@ export function createAlternatorPostSigningMiddleware<Input extends object, Outp
   };
 }
 
-function getOrCreateQueryPlan<Input extends object>(
+function nextNodeForAttempt<Input extends object>(
   context: HandlerExecutionContext,
   input: Input,
   discovery: AlternatorDiscovery,
   keyAffinity: KeyRouteAffinityPlanner,
-): AlternatorQueryPlan {
+): AlternatorNode | undefined {
   const contextRecord = context as HandlerExecutionContext & {
     [queryPlanKey]?: AlternatorQueryPlan;
   };
 
   if (!contextRecord[queryPlanKey]) {
-    const nodes = discovery.getLiveNodes();
-    contextRecord[queryPlanKey] =
-      keyAffinity.queryPlanForInput(input, nodes, context.commandName) ?? discovery.createQueryPlan();
+    contextRecord[queryPlanKey] = createQueryPlan(context, input, discovery, keyAffinity);
   }
 
-  return contextRecord[queryPlanKey];
+  const node = contextRecord[queryPlanKey].next();
+  if (node) {
+    return node;
+  }
+
+  contextRecord[queryPlanKey] = createQueryPlan(context, input, discovery, keyAffinity);
+  return contextRecord[queryPlanKey].next();
+}
+
+function createQueryPlan<Input extends object>(
+  context: HandlerExecutionContext,
+  input: Input,
+  discovery: AlternatorDiscovery,
+  keyAffinity: KeyRouteAffinityPlanner,
+): AlternatorQueryPlan {
+  const nodes = discovery.getLiveNodes();
+  return keyAffinity.queryPlanForInput(input, nodes, context.commandName) ?? discovery.createQueryPlan();
 }
 
 function whitelistHeaders(
