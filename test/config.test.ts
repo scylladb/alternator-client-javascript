@@ -189,4 +189,27 @@ describe("AlternatorDynamoDBClient config", () => {
       }).alternatorConfig.compression.gzipLevel,
     ).toBe(-1);
   });
+
+  it("validates key route affinity type", () => {
+    for (const type of ["bad", "", 42]) {
+      expect(
+        () =>
+          new AlternatorDynamoDBClient({
+            seeds: ["localhost"],
+            keyRouteAffinity: {
+              type,
+            } as never,
+          }),
+      ).toThrow(/keyRouteAffinity\.type/);
+    }
+
+    expect(
+      new AlternatorDynamoDBClient({
+        seeds: ["localhost"],
+        keyRouteAffinity: {
+          type: "read-before-write",
+        },
+      }).alternatorConfig.keyRouteAffinity.type,
+    ).toBe("read-before-write");
+  });
 });
