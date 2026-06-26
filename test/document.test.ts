@@ -1,6 +1,6 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { PutCommand } from "@aws-sdk/lib-dynamodb";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { AlternatorDynamoDBClient } from "../src/client.js";
 import { AlternatorDynamoDBDocumentClient } from "../src/document.js";
 import { commandRequests, RecordingHandler, requestBodyJson } from "./helpers.js";
@@ -82,5 +82,39 @@ describe("AlternatorDynamoDBDocumentClient", () => {
 
     expect(commandRequests(handler)[0]?.hostname).toBe("aws-style.local");
     expect("getLiveNodes" in docClient).toBe(false);
+  });
+
+  it("destroys the owned low-level client and stops background discovery", async () => {
+    vi.useFakeTimers();
+    const handler = new RecordingHandler((request) => {
+      if (request.path === "/localnodes") {
+        return ["seed"];
+      }
+      return {};
+    });
+    const docClient = new AlternatorDynamoDBDocumentClient({
+      seeds: ["seed"],
+      requestHandler: handler,
+      discovery: {
+        background: true,
+        refreshIntervalMs: 10,
+      },
+    });
+
+    try {
+      await vi.advanceTimersByTimeAsync(25);
+      const callsBeforeDestroy = handler.requests.filter((request) => request.path === "/localnodes").length;
+      expect(callsBeforeDestroy).toBeGreaterThan(0);
+
+      docClient.destroy();
+      expect(handler.destroyCalls).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(25);
+      const callsAfterDestroy = handler.requests.filter((request) => request.path === "/localnodes").length;
+      expect(callsAfterDestroy).toBe(callsBeforeDestroy);
+    } finally {
+      docClient.destroy();
+      vi.useRealTimers();
+    }
   });
 });

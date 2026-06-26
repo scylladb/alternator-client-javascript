@@ -10,6 +10,7 @@ export type HandlerResponder = (
 export class RecordingHandler {
   readonly metadata = { handlerProtocol: "http/1.1" };
   readonly requests: HttpRequest[] = [];
+  destroyCalls = 0;
 
   constructor(private readonly responder: HandlerResponder = () => ({})) {}
 
@@ -34,6 +35,10 @@ export class RecordingHandler {
 
   httpHandlerConfigs(): Record<string, never> {
     return {};
+  }
+
+  destroy(): void {
+    this.destroyCalls += 1;
   }
 }
 
