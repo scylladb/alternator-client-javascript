@@ -122,8 +122,18 @@ function normalizeSeed(seed: string): string {
   if (trimmed.includes("://") || /[/?#]/.test(trimmed)) {
     throw new TypeError(`seed "${seed}" must be a host, not a URL`);
   }
-  if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+  if (trimmed.startsWith("[")) {
+    const bracketEnd = trimmed.indexOf("]");
+    if (bracketEnd < 0) {
+      throw new TypeError(`seed "${seed}" must be a valid IPv6 host`);
+    }
+    if (bracketEnd !== trimmed.length - 1) {
+      throw new TypeError(`seed "${seed}" must not include a port; use the port option`);
+    }
     return trimmed.slice(1, -1);
+  }
+  if (trimmed.includes("]")) {
+    throw new TypeError(`seed "${seed}" must be a valid IPv6 host`);
   }
 
   const colonCount = [...trimmed].filter((char) => char === ":").length;
