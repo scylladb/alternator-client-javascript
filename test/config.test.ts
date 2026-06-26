@@ -93,6 +93,32 @@ describe("AlternatorDynamoDBClient config", () => {
     ).toThrow(/cannot both be set/);
   });
 
+  it("rejects direct Node agent overrides in connection.node", () => {
+    expect(
+      () =>
+        new AlternatorDynamoDBClient({
+          seeds: ["localhost"],
+          connection: {
+            node: {
+              httpAgent: {},
+            },
+          } as never,
+        }),
+    ).toThrow(/httpAgent or httpsAgent/);
+
+    expect(
+      () =>
+        new AlternatorDynamoDBClient({
+          seeds: ["localhost"],
+          connection: {
+            node: {
+              httpsAgent: {},
+            },
+          } as never,
+        }),
+    ).toThrow(/httpAgent or httpsAgent/);
+  });
+
   it("validates key route affinity partition key mappings", () => {
     expect(
       () =>

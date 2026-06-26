@@ -284,6 +284,9 @@ function normalizeDiscovery(
 }
 
 function normalizeConnection(input: AlternatorConnectionOptions): AlternatorConnectionOptions {
+  if (input.node !== undefined && ("httpAgent" in input.node || "httpsAgent" in input.node)) {
+    throw new TypeError("connection.node cannot include httpAgent or httpsAgent; use Alternator connection and tls options");
+  }
   if (input.maxSockets !== undefined) {
     assertPositive(input.maxSockets, "connection.maxSockets");
   }
