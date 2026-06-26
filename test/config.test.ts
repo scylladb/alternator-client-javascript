@@ -18,8 +18,12 @@ describe("AlternatorDynamoDBClient config", () => {
   it("validates seed host, scheme, and port", () => {
     expect(() => new AlternatorDynamoDBClient({ seeds: ["http://localhost"] })).toThrow(/not a URL/);
     expect(() => new AlternatorDynamoDBClient({ seeds: ["localhost:8000"] })).toThrow(/must not include a port/);
+    expect(() => new AlternatorDynamoDBClient({ seeds: ["[::1]:8080"] })).toThrow(/must not include a port/);
+    expect(() => new AlternatorDynamoDBClient({ seeds: ["::1]"] })).toThrow(/valid IPv6/);
     expect(() => new AlternatorDynamoDBClient({ seeds: ["localhost"], scheme: "ftp" as never })).toThrow(/scheme/);
     expect(() => new AlternatorDynamoDBClient({ seeds: ["localhost"], port: 0 })).toThrow(/port/);
+
+    expect(new AlternatorDynamoDBClient({ seeds: ["[::1]"] }).getLiveNodes()[0]?.url).toBe("http://[::1]:8080");
   });
 
   it("uses Alternator defaults for URL and signing region", async () => {
