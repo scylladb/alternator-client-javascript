@@ -14,7 +14,7 @@ describe("public type usage", () => {
     const client = new AlternatorDynamoDBClient({
       seeds: ["localhost"],
       routing: routing.rack("dc1", "rack1", {
-        fallback: routing.cluster({ datacenters: ["dc1", "dc2"] }),
+        fallback: routing.cluster(),
       }),
       requestHandler: new RecordingHandler(),
       discovery: { background: false },

@@ -4,13 +4,8 @@ export interface RoutingFallbackOptions {
   fallback?: RoutingRule;
 }
 
-export interface ClusterRoutingOptions {
-  datacenters?: readonly string[];
-}
-
 export interface ClusterRoutingRule {
   readonly kind: "cluster";
-  readonly datacenters?: readonly string[];
 }
 
 export interface DatacenterRoutingRule {
@@ -33,38 +28,14 @@ export interface LocalNodesQuery {
   readonly rack?: string;
 }
 
-function assertName(name: unknown, label: string): asserts name is string {
+function assertName(name: string, label: string): void {
   if (typeof name !== "string" || name.trim() === "") {
     throw new TypeError(`${label} must be a non-empty string`);
   }
 }
 
-function normalizeNames(names: readonly string[] | undefined, label: string): string[] | undefined {
-  if (names === undefined) {
-    return undefined;
-  }
-  const values: unknown = names;
-  if (!Array.isArray(values)) {
-    throw new TypeError(`${label}s must be an array`);
-  }
-
-  const rawNames: readonly unknown[] = values;
-  const normalized = [...new Set(rawNames.map((name) => {
-    assertName(name, label);
-    return name.trim();
-  }))];
-  if (normalized.length === 0) {
-    throw new TypeError(`${label}s must contain at least one ${label}`);
-  }
-  return normalized;
-}
-
-function cluster(options: ClusterRoutingOptions = {}): ClusterRoutingRule {
-  const datacenters = normalizeNames(options.datacenters, "datacenter");
-  return {
-    kind: "cluster",
-    ...(datacenters ? { datacenters } : {}),
-  };
+function cluster(): ClusterRoutingRule {
+  return { kind: "cluster" };
 }
 
 function datacenter(datacenterName: string, options: RoutingFallbackOptions = {}): DatacenterRoutingRule {
@@ -98,9 +69,9 @@ export const routing = {
 };
 
 export function routingQueries(rule: RoutingRule): LocalNodesQuery[] {
-  const queries = queriesForRule(rule);
+  const query = queryForRule(rule);
   const fallback = "fallback" in rule ? rule.fallback : undefined;
-  return fallback ? [...queries, ...routingQueries(fallback)] : queries;
+  return fallback ? [query, ...routingQueries(fallback)] : [query];
 }
 
 export function routingChain(rule: RoutingRule): RoutingRule[] {
@@ -108,13 +79,13 @@ export function routingChain(rule: RoutingRule): RoutingRule[] {
   return fallback ? [rule, ...routingChain(fallback)] : [rule];
 }
 
-function queriesForRule(rule: RoutingRule): LocalNodesQuery[] {
+function queryForRule(rule: RoutingRule): LocalNodesQuery {
   switch (rule.kind) {
     case "cluster":
-      return rule.datacenters?.map((dc) => ({ dc })) ?? [{}];
+      return {};
     case "datacenter":
-      return [{ dc: rule.datacenter }];
+      return { dc: rule.datacenter };
     case "rack":
-      return [{ dc: rule.datacenter, rack: rule.rack }];
+      return { dc: rule.datacenter, rack: rule.rack };
   }
 }
