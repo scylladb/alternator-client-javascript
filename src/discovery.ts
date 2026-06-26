@@ -2,7 +2,7 @@ import { HttpRequest } from "@smithy/protocol-http";
 import type { HttpHandlerOptions } from "@smithy/types";
 import { bodyToString } from "./body.js";
 import { hostForUrl, nodeUrl } from "./config.js";
-import { routingChain, type ClusterRoutingRule, type LocalNodesQuery, type RoutingRule } from "./routing.js";
+import { routingChain, type LocalNodesQuery, type RoutingRule } from "./routing.js";
 import { AlternatorQueryPlan } from "./query-plan.js";
 import type { AlternatorNode, NormalizedAlternatorConfig } from "./types.js";
 
@@ -82,16 +82,7 @@ export class AlternatorDiscovery {
 
     for (const rule of routingChain(this.config.routing)) {
       if (rule.kind === "cluster") {
-        if (!rule.datacenters) {
-          return;
-        }
-
-        const missing = await this.missingClusterDatacenters(rule);
-        if (missing.length === 0) {
-          return;
-        }
-        errors.push(`scope ${routingRuleLabel(rule)} has no nodes in datacenter(s): ${missing.join(", ")}`);
-        continue;
+        return;
       }
 
       const query = queryForRoutingRule(rule);
@@ -125,7 +116,7 @@ export class AlternatorDiscovery {
     for (const rule of routingChain(this.config.routing)) {
       try {
         const nodes = rule.kind === "cluster"
-          ? await this.fetchClusterLocalNodes(rule, candidates)
+          ? await this.fetchClusterLocalNodes()
           : await this.fetchFirstAvailableLocalNodes(queryForRoutingRule(rule), candidates);
         if (nodes.length > 0) {
           this.liveHosts = normalizeDiscoveredHosts(nodes);
@@ -146,47 +137,24 @@ export class AlternatorDiscovery {
     return [...new Set([...this.liveHosts, ...this.config.seeds])];
   }
 
-  private async missingClusterDatacenters(rule: ClusterRoutingRule): Promise<string[]> {
-    const missing: string[] = [];
-    for (const dc of rule.datacenters ?? []) {
+  private async fetchClusterLocalNodes(): Promise<string[]> {
+    const nodes: string[] = [];
+    const query: LocalNodesQuery = {};
+
+    for (const host of this.config.seeds) {
       try {
-        const nodes = await this.fetchFirstAvailableLocalNodes({ dc });
-        if (nodes.length === 0) {
-          missing.push(dc);
+        const discovered = await this.fetchLocalNodes(host, query);
+        if (discovered.length > 0) {
+          nodes.push(...discovered);
+        } else {
+          this.config.logger.debug?.("alternator discovery: localnodes returned no nodes", { host, query });
         }
       } catch (error) {
-        throw new Error(`failed to read list of nodes for datacenter ${dc}: ${errorMessage(error)}`);
-      }
-    }
-    return missing;
-  }
-
-  private async fetchClusterLocalNodes(
-    rule: ClusterRoutingRule,
-    candidates: readonly string[] = this.candidateHosts(),
-  ): Promise<string[]> {
-    const nodes: string[] = [];
-    const queries = clusterQueries(rule);
-
-    for (const query of queries) {
-      for (const host of candidates) {
-        try {
-          const discovered = await this.fetchLocalNodes(host, query);
-          if (discovered.length > 0) {
-            nodes.push(...discovered);
-            if (query.dc) {
-              break;
-            }
-          } else {
-            this.config.logger.debug?.("alternator discovery: localnodes returned no nodes", { host, query });
-          }
-        } catch (error) {
-          this.config.logger.debug?.("alternator discovery: localnodes request failed", {
-            host,
-            query,
-            error,
-          });
-        }
+        this.config.logger.debug?.("alternator discovery: localnodes request failed", {
+          host,
+          query,
+          error,
+        });
       }
     }
 
@@ -274,10 +242,6 @@ function queryToRequestQuery(query: LocalNodesQuery): Record<string, string> {
   return result;
 }
 
-function clusterQueries(rule: ClusterRoutingRule): LocalNodesQuery[] {
-  return rule.datacenters?.map((dc) => ({ dc })) ?? [{}];
-}
-
 function normalizeDiscoveredHosts(hosts: readonly string[]): string[] {
   return [...new Set(hosts.map((host) => host.trim()).filter(Boolean))];
 }
@@ -300,9 +264,6 @@ function queryForRoutingRule(rule: RoutingRule): LocalNodesQuery {
 function routingRuleLabel(rule: RoutingRule): string {
   switch (rule.kind) {
     case "cluster":
-      if (rule.datacenters) {
-        return `Cluster(datacenters=${rule.datacenters.join(",")})`;
-      }
       return "Cluster()";
     case "datacenter":
       return `Datacenter(dc=${rule.datacenter})`;

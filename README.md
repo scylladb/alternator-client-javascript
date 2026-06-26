@@ -103,20 +103,15 @@ Routing helpers:
 
 ```ts
 routing.cluster();
-routing.cluster({ datacenters: ["dc1", "dc2"] });
 routing.datacenter("dc1", { fallback: routing.cluster() });
 routing.rack("dc1", "rack1", {
-  fallback: routing.datacenter("dc1", {
-    fallback: routing.cluster({ datacenters: ["dc1", "dc2"] }),
-  }),
+  fallback: routing.datacenter("dc1", { fallback: routing.cluster() }),
 });
 ```
 
-`routing.cluster()` queries `/localnodes` on every configured seed or already
-known live node and unions the returned local-node lists. In multi-datacenter
-deployments, configure at least one seed per datacenter, or pass known
-datacenter names with `routing.cluster({ datacenters: [...] })` so discovery can
-ask `/localnodes?dc=<name>` for each datacenter.
+`routing.cluster()` queries `/localnodes` on every configured seed and unions
+the returned local-node lists. In multi-datacenter deployments, configure at
+least one seed per datacenter.
 
 ## Runtime Matrix
 

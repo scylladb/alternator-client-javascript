@@ -21,7 +21,6 @@ export type {
   AlternatorUserAgentTransformer,
 } from "./types.js";
 export type {
-  ClusterRoutingOptions,
   ClusterRoutingRule,
   DatacenterRoutingRule,
   RackRoutingRule,
