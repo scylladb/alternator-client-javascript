@@ -10,6 +10,9 @@ interface DiscoveryRequestHandler {
   handle(request: HttpRequest, options?: HttpHandlerOptions): Promise<{ response: { statusCode: number; body?: unknown } }>;
 }
 
+type RackDatacenterSupport = "supported" | "unsupported" | "unknown";
+type RackDatacenterProbeKind = "datacenter" | "rack";
+
 export class AlternatorDiscovery {
   private liveHosts: string[];
   private refreshTimer: ReturnType<typeof setInterval> | undefined;
@@ -61,28 +64,44 @@ export class AlternatorDiscovery {
   }
 
   async checkRackDatacenterSupport(): Promise<boolean> {
-    const probe = {
-      dc: "__alternator_client_missing_dc__",
-      rack: "__alternator_client_missing_rack__",
-    };
+    const datacenterSupport = await this.probeRackDatacenterSupport("datacenter");
+    const rackSupport = await this.probeRackDatacenterSupport("rack");
+    return datacenterSupport === "supported" && rackSupport === "supported";
+  }
+
+  private async probeRackDatacenterSupport(kind: RackDatacenterProbeKind): Promise<RackDatacenterSupport> {
+    const probe = missingScopeProbe(kind);
 
     for (const host of this.candidateHosts()) {
       try {
         const nodes = await this.fetchLocalNodes(host, probe);
-        return nodes.length === 0;
+        return nodes.length === 0 ? "supported" : "unsupported";
       } catch {
         continue;
       }
     }
-    return false;
+    return "unknown";
   }
 
   async checkIfRackAndDatacenterSetCorrectly(): Promise<void> {
     const errors: string[] = [];
+    let datacenterSupport: RackDatacenterSupport | undefined;
+    let rackSupport: RackDatacenterSupport | undefined;
 
     for (const rule of routingChain(this.config.routing)) {
       if (rule.kind === "cluster") {
         return;
+      }
+
+      datacenterSupport ??= await this.probeRackDatacenterSupport("datacenter");
+      if (datacenterSupport === "unsupported") {
+        throw new Error("Alternator /localnodes does not support datacenter query parameters");
+      }
+      if (rule.kind === "rack") {
+        rackSupport ??= await this.probeRackDatacenterSupport("rack");
+        if (rackSupport === "unsupported") {
+          throw new Error("Alternator /localnodes does not support rack query parameters");
+        }
       }
 
       const query = queryForRoutingRule(rule);
@@ -112,12 +131,33 @@ export class AlternatorDiscovery {
 
   private async refreshLiveNodesOnce(): Promise<AlternatorNode[]> {
     const candidates = this.candidateHosts();
+    let datacenterSupport: RackDatacenterSupport | undefined;
+    let rackSupport: RackDatacenterSupport | undefined;
 
     for (const rule of routingChain(this.config.routing)) {
       try {
-        const nodes = rule.kind === "cluster"
-          ? await this.fetchClusterLocalNodes()
-          : await this.fetchFirstAvailableLocalNodes(queryForRoutingRule(rule), candidates);
+        let nodes: string[];
+        if (rule.kind === "cluster") {
+          nodes = await this.fetchClusterLocalNodes();
+        } else {
+          datacenterSupport ??= await this.probeRackDatacenterSupport("datacenter");
+          if (datacenterSupport === "unsupported") {
+            this.config.logger.debug?.("alternator discovery: datacenter query parameters are unsupported", {
+              rule: routingRuleLabel(rule),
+            });
+            continue;
+          }
+          if (rule.kind === "rack") {
+            rackSupport ??= await this.probeRackDatacenterSupport("rack");
+            if (rackSupport === "unsupported") {
+              this.config.logger.debug?.("alternator discovery: rack query parameters are unsupported", {
+                rule: routingRuleLabel(rule),
+              });
+              continue;
+            }
+          }
+          nodes = await this.fetchFirstAvailableLocalNodes(queryForRoutingRule(rule), candidates);
+        }
         if (nodes.length > 0) {
           this.liveHosts = normalizeDiscoveredHosts(nodes);
           return this.getLiveNodes();
@@ -240,6 +280,15 @@ function queryToRequestQuery(query: LocalNodesQuery): Record<string, string> {
     result.rack = query.rack;
   }
   return result;
+}
+
+function missingScopeProbe(kind: RackDatacenterProbeKind): LocalNodesQuery {
+  switch (kind) {
+    case "datacenter":
+      return { dc: "__alternator_client_missing_dc__" };
+    case "rack":
+      return { rack: "__alternator_client_missing_rack__" };
+  }
 }
 
 function normalizeDiscoveredHosts(hosts: readonly string[]): string[] {
