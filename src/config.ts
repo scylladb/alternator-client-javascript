@@ -43,7 +43,7 @@ export function normalizeConfig(input: AlternatorDynamoDBClientConfig): Normaliz
   assertPort(port);
 
   const seeds = normalizeSeeds(input.seeds);
-  const runtime = input.runtime ?? detectRuntime();
+  const runtime = normalizeRuntime(input.runtime);
   const noAuth = input.credentials === undefined;
   const routingRule = normalizeRouting(input.routing);
   const compression = normalizeCompression(input.compression);
@@ -177,6 +177,14 @@ function normalizeRoutingFallback(
     return {};
   }
   return { fallback: normalizeRoutingRule(fallback, `${label}.fallback`) };
+}
+
+function normalizeRuntime(runtime: AlternatorDynamoDBClientConfig["runtime"]): AlternatorRuntime {
+  const normalized = runtime ?? detectRuntime();
+  if (normalized !== "node" && normalized !== "edge") {
+    throw new TypeError('runtime must be either "node" or "edge"');
+  }
+  return normalized;
 }
 
 function normalizeCompression(input: AlternatorDynamoDBClientConfig["compression"]) {

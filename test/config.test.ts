@@ -49,6 +49,14 @@ describe("AlternatorDynamoDBClient config", () => {
       () =>
         new AlternatorDynamoDBClient({
           seeds: ["localhost"],
+          runtime: "worker" as never,
+        }),
+    ).toThrow(/runtime/);
+
+    expect(
+      () =>
+        new AlternatorDynamoDBClient({
+          seeds: ["localhost"],
           runtime: "edge",
           tls: { caFile: "/tmp/ca.pem" },
         }),
