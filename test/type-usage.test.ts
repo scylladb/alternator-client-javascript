@@ -13,7 +13,9 @@ describe("public type usage", () => {
   it("accepts native AWS SDK v3 commands", () => {
     const client = new AlternatorDynamoDBClient({
       seeds: ["localhost"],
-      routing: routing.datacenter("dc1", { fallback: routing.cluster() }),
+      routing: routing.rack("dc1", "rack1", {
+        fallback: routing.cluster({ datacenters: ["dc1", "dc2"] }),
+      }),
       requestHandler: new RecordingHandler(),
       discovery: { background: false },
       logger: console,
