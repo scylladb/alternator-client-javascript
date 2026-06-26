@@ -179,6 +179,7 @@ describe("Alternator middleware", () => {
     const headers = commandRequests(handler)[0]?.headers ?? {};
     expect(headers["user-agent"]).toBe(alternatorUserAgentToken());
     expect(headers["user-agent"]).not.toContain("app/1");
+    expect(headers["x-amz-user-agent"]).toBeUndefined();
   });
 
   it("supports replacing, transforming, and removing the Alternator User-Agent", async () => {
@@ -214,6 +215,7 @@ describe("Alternator middleware", () => {
       `${alternatorUserAgentToken()} app/4.5.6`,
     );
     expect(commandRequests(removed)[0]?.headers["user-agent"]).toBeUndefined();
+    expect(commandRequests(removed)[0]?.headers["x-amz-user-agent"]).toBeUndefined();
   });
 
   it("keeps the generated User-Agent when header optimization is enabled", async () => {

@@ -83,7 +83,9 @@ export function createAlternatorPostSigningMiddleware<Input extends object, Outp
       ]);
     }
 
-    request.headers = applyUserAgent(request.headers, config.userAgent);
+    request.headers = applyUserAgent(request.headers, config.userAgent, {
+      removeAwsSdkUserAgent: config.noAuth,
+    });
 
     return next({
       ...args,
