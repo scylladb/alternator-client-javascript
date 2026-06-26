@@ -2,5 +2,11 @@ node_modules/
 dist/
 coverage/
 .turbo/
+.docker-cache/
+.cert-cache/
+bin/
+test/scylla/*
+!test/scylla/
+!test/scylla/scylla.yaml
 .DS_Store
 npm-debug.log*

@@ -31,8 +31,10 @@ describe("Alternator discovery", () => {
         url: "http://node-b.internal:8080",
       },
     ]);
-    expect(client.nextNode().host).toBe("node-a.internal");
-    expect(client.nextNode().host).toBe("node-b.internal");
+    expect(client.getLiveNodes().map((node) => node.host)).toEqual([
+      "node-a.internal",
+      "node-b.internal",
+    ]);
   });
 
   it("tries rack/datacenter routing fallback in order", async () => {

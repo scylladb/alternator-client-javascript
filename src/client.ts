@@ -72,10 +72,6 @@ export class AlternatorDynamoDBClient extends DynamoDBClient {
     return this.discovery.refreshLiveNodes();
   }
 
-  nextNode(): AlternatorNode {
-    return this.discovery.nextNode();
-  }
-
   checkRackDatacenterSupport(): Promise<boolean> {
     return this.discovery.checkRackDatacenterSupport();
   }

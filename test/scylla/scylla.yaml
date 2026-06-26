@@ -1,0 +1,32 @@
+num_tokens: 256
+
+commitlog_sync: periodic
+commitlog_sync_period_in_ms: 10000
+commitlog_segment_size_in_mb: 32
+schema_commitlog_segment_size_in_mb: 128
+
+seed_provider:
+  - class_name: org.apache.cassandra.locator.SimpleSeedProvider
+    parameters:
+      - seeds: "127.0.0.1"
+
+listen_address: localhost
+rpc_address: localhost
+endpoint_snitch: SimpleSnitch
+
+native_transport_port: 9042
+native_shard_aware_transport_port: 19042
+native_transport_port_ssl: 9142
+native_shard_aware_transport_port_ssl: 19142
+
+api_port: 10000
+api_address: 127.0.0.1
+
+alternator_encryption_options:
+  enable_session_tickets: true
+  certificate: /etc/scylla/db.crt
+  keyfile: /etc/scylla/db.key
+
+alternator_https_port: 9999
+alternator_port: 9998
+alternator_write_isolation: only_rmw_uses_lwt
