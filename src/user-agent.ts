@@ -46,11 +46,17 @@ export function normalizeUserAgent(input: AlternatorUserAgentConfig | undefined)
 export function applyUserAgent(
   headers: Record<string, string | undefined>,
   userAgent: NormalizedUserAgentOptions,
+  options: { removeAwsSdkUserAgent?: boolean } = {},
 ): Record<string, string> {
   const nextHeaders: Record<string, string> = {};
 
   for (const [name, value] of Object.entries(headers)) {
-    if (value === undefined || name.toLowerCase() === "user-agent") {
+    const normalizedName = name.toLowerCase();
+    if (
+      value === undefined ||
+      normalizedName === "user-agent" ||
+      (options.removeAwsSdkUserAgent && normalizedName === "x-amz-user-agent")
+    ) {
       continue;
     }
     nextHeaders[name] = value;
