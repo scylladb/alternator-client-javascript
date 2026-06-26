@@ -1,0 +1,171 @@
+name: Release package
+
+on:
+  release:
+    types:
+      - published
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish to npm instead of only validating the release process"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IS_CICD: 1
+
+jobs:
+  publish:
+    name: Publish
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          registry-url: "https://registry.npmjs.org"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify package
+        run: npm run verify
+
+      - name: Cache Docker image
+        id: docker-cache
+        uses: actions/cache@v5
+        with:
+          path: .docker-cache
+          key: scylla-docker-${{ hashFiles('test/docker-compose.yml') }}
+
+      - name: Save Docker image to cache
+        if: steps.docker-cache.outputs.cache-hit != 'true'
+        run: make docker-cache-save
+
+      - name: Cache certificates
+        id: cert-cache
+        uses: actions/cache@v5
+        with:
+          path: .cert-cache
+          key: scylla-certs-${{ hashFiles('Makefile') }}
+
+      - name: Save certificates to cache
+        if: steps.cert-cache.outputs.cache-hit != 'true'
+        run: make cert-cache-save
+
+      - name: Run integration tests
+        run: make test-all
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=moderate
+
+      - name: Check release tag matches package version
+        if: github.event_name == 'release'
+        run: |
+          version=$(node -p "require('./package.json').version")
+          tag="${GITHUB_REF_NAME#v}"
+
+          if [ "$version" != "$tag" ]; then
+            echo "package.json version $version does not match release tag $GITHUB_REF_NAME"
+            exit 1
+          fi
+
+      - name: Block manual publish outside main
+        if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref != 'refs/heads/main'
+        run: |
+          echo "Manual npm publish is only allowed from the main branch."
+          exit 1
+
+      - name: Dry-run publish
+        run: npm publish --dry-run --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish
+        if: github.event_name == 'release' || inputs.publish
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  verify-published-package:
+    name: Verify published package
+    if: github.event_name == 'release' || inputs.publish
+    needs: publish
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Read package version
+        id: package
+        run: |
+          version=$(node -p "require('./package.json').version")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Install published package
+        run: |
+          mkdir -p /tmp/alternator-client-publish-check
+          cd /tmp/alternator-client-publish-check
+          npm init -y
+
+          for attempt in 1 2 3 4 5; do
+            if npm install "@scylladb/alternator-client@${PACKAGE_VERSION}"; then
+              exit 0
+            fi
+
+            echo "Attempt $attempt failed, retrying in 15s."
+            sleep 15
+          done
+
+          echo "Could not install @scylladb/alternator-client@${PACKAGE_VERSION} from npm."
+          exit 1
+        env:
+          PACKAGE_VERSION: ${{ steps.package.outputs.version }}
+
+      - name: Verify package exports
+        working-directory: /tmp/alternator-client-publish-check
+        run: |
+          node --input-type=module <<'JS'
+          const main = await import("@scylladb/alternator-client");
+          const document = await import("@scylladb/alternator-client/document");
+
+          if (typeof main.AlternatorDynamoDBClient !== "function") {
+            throw new Error("missing ESM AlternatorDynamoDBClient export");
+          }
+
+          if (typeof document.AlternatorDynamoDBDocumentClient !== "function") {
+            throw new Error("missing ESM AlternatorDynamoDBDocumentClient export");
+          }
+          JS
+
+          node <<'JS'
+          const main = require("@scylladb/alternator-client");
+          const document = require("@scylladb/alternator-client/document");
+
+          if (typeof main.AlternatorDynamoDBClient !== "function") {
+            throw new Error("missing CJS AlternatorDynamoDBClient export");
+          }
+
+          if (typeof document.AlternatorDynamoDBDocumentClient !== "function") {
+            throw new Error("missing CJS AlternatorDynamoDBDocumentClient export");
+          }
+          JS
