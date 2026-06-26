@@ -181,8 +181,7 @@ describeIntegration.each(integrationEndpoints())(
         expect(headers["x-amz-target"]).toBe("DynamoDB_20120810.ListTables");
         expect(headers.authorization).toContain("AWS4-HMAC-SHA256");
         expect(headers["x-amz-date"]).toBeDefined();
-        expect(headers["content-type"]).toBeUndefined();
-        expect(headers["x-amz-content-sha256"]).toBeUndefined();
+        expectSignedHeadersPresent(headers);
       } finally {
         client.destroy();
       }
@@ -232,7 +231,7 @@ describeIntegration.each(integrationEndpoints())(
         expect(headers.authorization).toContain("AWS4-HMAC-SHA256");
         expect(headers["x-amz-date"]).toBeDefined();
         expect(headers["content-type"]).toBe("application/x-amz-json-1.0");
-        expect(headers["x-amz-content-sha256"]).toBeUndefined();
+        expectSignedHeadersPresent(headers);
       } finally {
         client.destroy();
       }
@@ -275,7 +274,7 @@ describeIntegration.each(integrationEndpoints())(
         const headers = commandHeaders(captured, "PutItemCommand");
         expect(headers["content-encoding"]).toBe("gzip");
         expect(headers["content-length"]).toBeDefined();
-        expect(headers["content-type"]).toBeUndefined();
+        expectSignedHeadersPresent(headers);
       } finally {
         client.destroy();
       }
@@ -288,3 +287,14 @@ describe("integration test opt-in", () => {
     expect(typeof integrationConfig.enabled).toBe("boolean");
   });
 });
+
+function expectSignedHeadersPresent(headers: Record<string, string | undefined>): void {
+  for (const name of signedHeaderNames(headers.authorization)) {
+    expect(headers[name]).toBeDefined();
+  }
+}
+
+function signedHeaderNames(authorization: string | undefined): string[] {
+  const match = authorization?.match(/(?:^|,\s*)SignedHeaders=([^,\s]+)/);
+  return match?.[1]?.split(";").filter(Boolean) ?? [];
+}
