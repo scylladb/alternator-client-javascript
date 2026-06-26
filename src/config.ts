@@ -173,9 +173,30 @@ function normalizeKeyRouteAffinity(input: AlternatorDynamoDBClientConfig["keyRou
   return {
     enabled: type !== "none" && input?.enabled !== false,
     type,
-    partitionKeys: new Map(Object.entries(input?.partitionKeys ?? {})),
+    partitionKeys: normalizePartitionKeys(input?.partitionKeys),
     autoDiscoverPartitionKeys: input?.autoDiscoverPartitionKeys ?? type !== "none",
   } as const;
+}
+
+function normalizePartitionKeys(partitionKeys: unknown): Map<string, string> {
+  if (partitionKeys === undefined) {
+    return new Map<string, string>();
+  }
+  if (typeof partitionKeys !== "object" || partitionKeys === null || Array.isArray(partitionKeys)) {
+    throw new TypeError("keyRouteAffinity.partitionKeys must be an object mapping table names to partition keys");
+  }
+
+  const normalized = new Map<string, string>();
+  for (const [tableName, keyName] of Object.entries(partitionKeys)) {
+    if (tableName.trim() === "") {
+      throw new TypeError("keyRouteAffinity.partitionKeys table names must be non-empty strings");
+    }
+    if (typeof keyName !== "string" || keyName.trim() === "") {
+      throw new TypeError("keyRouteAffinity.partitionKeys values must be non-empty strings");
+    }
+    normalized.set(tableName, keyName);
+  }
+  return normalized;
 }
 
 function normalizeDiscovery(

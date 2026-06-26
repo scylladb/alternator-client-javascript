@@ -84,4 +84,40 @@ describe("AlternatorDynamoDBClient config", () => {
         }),
     ).toThrow(/cannot both be set/);
   });
+
+  it("validates key route affinity partition key mappings", () => {
+    expect(
+      () =>
+        new AlternatorDynamoDBClient({
+          seeds: ["localhost"],
+          keyRouteAffinity: {
+            partitionKeys: {
+              users: 123,
+            },
+          } as never,
+        }),
+    ).toThrow(/partitionKeys values/);
+
+    expect(
+      () =>
+        new AlternatorDynamoDBClient({
+          seeds: ["localhost"],
+          keyRouteAffinity: {
+            partitionKeys: {
+              users: "",
+            },
+          },
+        }),
+    ).toThrow(/partitionKeys values/);
+
+    const client = new AlternatorDynamoDBClient({
+      seeds: ["localhost"],
+      keyRouteAffinity: {
+        partitionKeys: {
+          users: "id",
+        },
+      },
+    });
+    expect(client.getPartitionKeyName("users")).toBe("id");
+  });
 });
