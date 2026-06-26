@@ -1,6 +1,7 @@
 import { routing } from "./routing.js";
 import { normalizeLogger } from "./logger.js";
 import { normalizeUserAgent } from "./user-agent.js";
+import type { RoutingRule } from "./routing.js";
 import type {
   AlternatorConnectionOptions,
   AlternatorDynamoDBClientConfig,
@@ -44,6 +45,7 @@ export function normalizeConfig(input: AlternatorDynamoDBClientConfig): Normaliz
   const seeds = normalizeSeeds(input.seeds);
   const runtime = input.runtime ?? detectRuntime();
   const noAuth = input.credentials === undefined;
+  const routingRule = normalizeRouting(input.routing);
   const compression = normalizeCompression(input.compression);
   const headerOptimization = normalizeHeaderOptimization(input.headerOptimization, noAuth);
   const userAgent = normalizeUserAgent(input.userAgent);
@@ -55,7 +57,7 @@ export function normalizeConfig(input: AlternatorDynamoDBClientConfig): Normaliz
     seeds,
     scheme,
     port,
-    routing: input.routing ?? routing.cluster(),
+    routing: routingRule,
     runtime,
     compression,
     headerOptimization,
@@ -129,6 +131,52 @@ function normalizeSeed(seed: string): string {
   }
 
   return trimmed;
+}
+
+function normalizeRouting(input: AlternatorDynamoDBClientConfig["routing"]): RoutingRule {
+  if (input === undefined) {
+    return routing.cluster();
+  }
+  return normalizeRoutingRule(input, "routing");
+}
+
+function normalizeRoutingRule(input: unknown, label: string): RoutingRule {
+  if (!isRecord(input)) {
+    throw new TypeError(`${label} must be a routing rule object`);
+  }
+
+  switch (input.kind) {
+    case "cluster":
+      return routing.cluster();
+    case "datacenter":
+      assertNonEmptyString(input.datacenter, `${label}.datacenter`);
+      return {
+        kind: "datacenter",
+        datacenter: input.datacenter,
+        ...normalizeRoutingFallback(input.fallback, label),
+      };
+    case "rack":
+      assertNonEmptyString(input.datacenter, `${label}.datacenter`);
+      assertNonEmptyString(input.rack, `${label}.rack`);
+      return {
+        kind: "rack",
+        datacenter: input.datacenter,
+        rack: input.rack,
+        ...normalizeRoutingFallback(input.fallback, label),
+      };
+    default:
+      throw new TypeError(`${label}.kind must be "cluster", "datacenter", or "rack"`);
+  }
+}
+
+function normalizeRoutingFallback(
+  fallback: unknown,
+  label: string,
+): { fallback?: RoutingRule } {
+  if (fallback === undefined) {
+    return {};
+  }
+  return { fallback: normalizeRoutingRule(fallback, `${label}.fallback`) };
 }
 
 function normalizeCompression(input: AlternatorDynamoDBClientConfig["compression"]) {
@@ -245,6 +293,16 @@ function assertNonNegative(value: number, label: string): void {
   if (!Number.isFinite(value) || value < 0) {
     throw new TypeError(`${label} must be a non-negative number`);
   }
+}
+
+function assertNonEmptyString(value: unknown, label: string): asserts value is string {
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new TypeError(`${label} must be a non-empty string`);
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 function defaultAllowedHeaders(noAuth: boolean): readonly string[] {

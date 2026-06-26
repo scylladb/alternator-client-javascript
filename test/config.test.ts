@@ -120,4 +120,42 @@ describe("AlternatorDynamoDBClient config", () => {
     });
     expect(client.getPartitionKeyName("users")).toBe("id");
   });
+
+  it("validates routing objects supplied from JavaScript", () => {
+    expect(
+      () =>
+        new AlternatorDynamoDBClient({
+          seeds: ["localhost"],
+          routing: {
+            kind: "rack",
+            datacenter: "dc1",
+          } as never,
+        }),
+    ).toThrow(/routing\.rack/);
+
+    expect(
+      () =>
+        new AlternatorDynamoDBClient({
+          seeds: ["localhost"],
+          routing: {
+            kind: "unknown",
+          } as never,
+        }),
+    ).toThrow(/routing\.kind/);
+
+    expect(
+      () =>
+        new AlternatorDynamoDBClient({
+          seeds: ["localhost"],
+          routing: {
+            kind: "datacenter",
+            datacenter: "dc1",
+            fallback: {
+              kind: "rack",
+              datacenter: "dc1",
+            },
+          } as never,
+        }),
+    ).toThrow(/routing\.fallback\.rack/);
+  });
 });
