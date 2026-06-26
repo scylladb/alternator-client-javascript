@@ -5,6 +5,7 @@ import type { RoutingRule } from "./routing.js";
 import type {
   AlternatorConnectionOptions,
   AlternatorDynamoDBClientConfig,
+  AlternatorKeyRouteAffinityType,
   AlternatorRuntime,
   NormalizedAlternatorConfig,
 } from "./types.js";
@@ -225,7 +226,7 @@ function normalizeKeyRouteAffinity(input: AlternatorDynamoDBClientConfig["keyRou
       autoDiscoverPartitionKeys: input,
     } as const;
   }
-  const type = input?.type ?? (input?.enabled ? "any-write" : "none");
+  const type = normalizeKeyRouteAffinityType(input?.type ?? (input?.enabled ? "any-write" : "none"));
   return {
     enabled: type !== "none" && input?.enabled !== false,
     type,
@@ -253,6 +254,13 @@ function normalizePartitionKeys(partitionKeys: unknown): Map<string, string> {
     normalized.set(tableName, keyName);
   }
   return normalized;
+}
+
+function normalizeKeyRouteAffinityType(type: unknown): AlternatorKeyRouteAffinityType {
+  if (type === "none" || type === "read-before-write" || type === "any-write") {
+    return type;
+  }
+  throw new TypeError('keyRouteAffinity.type must be "none", "read-before-write", or "any-write"');
 }
 
 function normalizeDiscovery(
