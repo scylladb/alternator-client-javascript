@@ -1,0 +1,255 @@
+import { HttpRequest } from "@smithy/protocol-http";
+import type { HttpHandlerOptions } from "@smithy/types";
+import { bodyToString } from "./body.js";
+import { hostForUrl, nodeUrl } from "./config.js";
+import { routingChain, routingQueries, type LocalNodesQuery, type RoutingRule } from "./routing.js";
+import { AlternatorQueryPlan } from "./query-plan.js";
+import type { AlternatorNode, NormalizedAlternatorConfig } from "./types.js";
+
+interface DiscoveryRequestHandler {
+  handle(request: HttpRequest, options?: HttpHandlerOptions): Promise<{ response: { statusCode: number; body?: unknown } }>;
+}
+
+export class AlternatorDiscovery {
+  private liveHosts: string[];
+  private cursor = 0;
+  private refreshTimer: ReturnType<typeof setInterval> | undefined;
+  private lastRefreshAttempt = 0;
+  private inFlightRefresh: Promise<AlternatorNode[]> | undefined;
+
+  constructor(
+    private readonly config: NormalizedAlternatorConfig,
+    private readonly requestHandler: DiscoveryRequestHandler,
+  ) {
+    this.liveHosts = [...config.seeds];
+    if (config.runtime === "node" && config.discovery.background && config.discovery.refreshIntervalMs > 0) {
+      this.refreshTimer = setInterval(() => {
+        this.refreshLiveNodes().catch(() => undefined);
+      }, config.discovery.refreshIntervalMs);
+      this.refreshTimer.unref?.();
+    }
+  }
+
+  getLiveNodes(): AlternatorNode[] {
+    return this.liveHosts.map((host) => this.toNode(host));
+  }
+
+  createQueryPlan(preferredNode?: AlternatorNode): AlternatorQueryPlan {
+    return new AlternatorQueryPlan(this.getLiveNodes(), [], preferredNode);
+  }
+
+  nextNode(): AlternatorNode {
+    const liveHosts = this.liveHosts.length > 0 ? this.liveHosts : [...this.config.seeds];
+    const index = this.cursor++ % liveHosts.length;
+
+    const host = liveHosts[index];
+    if (!host) {
+      throw new Error("Alternator has no live nodes or seeds configured");
+    }
+    return this.toNode(host);
+  }
+
+  async refreshLiveNodes(): Promise<AlternatorNode[]> {
+    if (this.inFlightRefresh) {
+      return this.inFlightRefresh;
+    }
+
+    this.lastRefreshAttempt = Date.now();
+    this.inFlightRefresh = this.refreshLiveNodesOnce().finally(() => {
+      this.inFlightRefresh = undefined;
+    });
+    return this.inFlightRefresh;
+  }
+
+  async refreshIfDue(): Promise<void> {
+    if (this.config.runtime !== "edge") {
+      return;
+    }
+    const interval = this.config.discovery.requestRefreshIntervalMs;
+    if (interval <= 0 || Date.now() - this.lastRefreshAttempt < interval) {
+      return;
+    }
+    await this.refreshLiveNodes();
+  }
+
+  async checkRackDatacenterSupport(): Promise<boolean> {
+    const probe = {
+      dc: "__alternator_client_missing_dc__",
+      rack: "__alternator_client_missing_rack__",
+    };
+
+    for (const host of this.candidateHosts()) {
+      try {
+        const nodes = await this.fetchLocalNodes(host, probe);
+        return nodes.length === 0;
+      } catch {
+        continue;
+      }
+    }
+    return false;
+  }
+
+  async checkIfRackAndDatacenterSetCorrectly(): Promise<void> {
+    const errors: string[] = [];
+
+    for (const rule of routingChain(this.config.routing)) {
+      if (rule.kind === "cluster") {
+        return;
+      }
+
+      const query = queryForRoutingRule(rule);
+      try {
+        const nodes = await this.fetchFirstSuccessfulLocalNodes(query);
+        if (nodes.length > 0) {
+          return;
+        }
+        errors.push(`scope ${routingRuleLabel(rule)} has no nodes`);
+      } catch (error) {
+        throw new Error(`failed to read list of nodes: ${errorMessage(error)}`);
+      }
+    }
+
+    const message = errors.length > 0
+      ? errors.join("; ")
+      : "configured rack/datacenter routing has no matching nodes";
+    throw new Error(message);
+  }
+
+  destroy(): void {
+    if (this.refreshTimer) {
+      clearInterval(this.refreshTimer);
+      this.refreshTimer = undefined;
+    }
+  }
+
+  private async refreshLiveNodesOnce(): Promise<AlternatorNode[]> {
+    const queries = routingQueries(this.config.routing);
+    const candidates = this.candidateHosts();
+
+    for (const query of queries) {
+      for (const host of candidates) {
+        try {
+          const nodes = await this.fetchLocalNodes(host, query);
+          if (nodes.length > 0) {
+            this.liveHosts = normalizeDiscoveredHosts(nodes);
+            this.cursor = this.cursor % this.liveHosts.length;
+            return this.getLiveNodes();
+          }
+          this.config.logger.debug?.("alternator discovery: localnodes returned no nodes", { host, query });
+        } catch (error) {
+          this.config.logger.debug?.("alternator discovery: localnodes request failed", {
+            host,
+            query,
+            error,
+          });
+          continue;
+        }
+      }
+    }
+
+    return this.getLiveNodes();
+  }
+
+  private candidateHosts(): string[] {
+    return [...new Set([...this.liveHosts, ...this.config.seeds])];
+  }
+
+  private async fetchFirstSuccessfulLocalNodes(query: LocalNodesQuery): Promise<string[]> {
+    let lastError: unknown;
+    for (const host of this.candidateHosts()) {
+      try {
+        return await this.fetchLocalNodes(host, query);
+      } catch (error) {
+        lastError = error;
+        this.config.logger.debug?.("alternator discovery: localnodes request failed", {
+          host,
+          query,
+          error,
+        });
+      }
+    }
+    throw lastError ?? new Error("no Alternator seed hosts are available");
+  }
+
+  private async fetchLocalNodes(host: string, query: LocalNodesQuery): Promise<string[]> {
+    const request = new HttpRequest({
+      protocol: `${this.config.scheme}:`,
+      method: "GET",
+      hostname: hostForUrl(host),
+      port: this.config.port,
+      path: "/localnodes",
+      query: queryToRequestQuery(query),
+      headers: {
+        host: hostHeader(host, this.config.port),
+      },
+    });
+    const response = await this.requestHandler.handle(request, {
+      requestTimeout: this.config.discovery.timeoutMs,
+    });
+
+    if (response.response.statusCode < 200 || response.response.statusCode >= 300) {
+      throw new Error(`/localnodes returned HTTP ${response.response.statusCode}`);
+    }
+
+    const body = await bodyToString(response.response.body);
+    const parsed: unknown = JSON.parse(body);
+    if (!Array.isArray(parsed) || !parsed.every((node) => typeof node === "string")) {
+      throw new Error("/localnodes returned an invalid node list");
+    }
+    return parsed;
+  }
+
+  private toNode(host: string): AlternatorNode {
+    return {
+      host,
+      scheme: this.config.scheme,
+      port: this.config.port,
+      url: nodeUrl(host, this.config),
+    };
+  }
+}
+
+function queryToRequestQuery(query: LocalNodesQuery): Record<string, string> {
+  const result: Record<string, string> = {};
+  if (query.dc) {
+    result.dc = query.dc;
+  }
+  if (query.rack) {
+    result.rack = query.rack;
+  }
+  return result;
+}
+
+function normalizeDiscoveredHosts(hosts: readonly string[]): string[] {
+  return [...new Set(hosts.map((host) => host.trim()).filter(Boolean))];
+}
+
+function hostHeader(host: string, port: number): string {
+  return `${hostForUrl(host)}:${port}`;
+}
+
+function queryForRoutingRule(rule: RoutingRule): LocalNodesQuery {
+  switch (rule.kind) {
+    case "cluster":
+      return {};
+    case "datacenter":
+      return { dc: rule.datacenter };
+    case "rack":
+      return { dc: rule.datacenter, rack: rule.rack };
+  }
+}
+
+function routingRuleLabel(rule: RoutingRule): string {
+  switch (rule.kind) {
+    case "cluster":
+      return "Cluster()";
+    case "datacenter":
+      return `Datacenter(dc=${rule.datacenter})`;
+    case "rack":
+      return `Rack(dc=${rule.datacenter}, rack=${rule.rack})`;
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
