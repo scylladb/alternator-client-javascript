@@ -118,6 +118,28 @@ describe("Alternator middleware", () => {
     ]);
   });
 
+  it("keeps session credential headers when header optimization is enabled", async () => {
+    const handler = new RecordingHandler(() => ({ TableNames: [] }));
+    const client = new AlternatorDynamoDBClient({
+      seeds: ["seed"],
+      requestHandler: handler,
+      discovery: { background: false },
+      credentials: {
+        accessKeyId: "key",
+        secretAccessKey: "secret",
+        sessionToken: "session-token",
+      },
+      headerOptimization: true,
+    });
+
+    await client.send(new ListTablesCommand({}));
+
+    const headers = commandRequests(handler)[0]?.headers ?? {};
+    expect(headers.authorization).toContain("SignedHeaders=");
+    expect(headers.authorization).toContain("x-amz-security-token");
+    expect(headers["x-amz-security-token"]).toBe("session-token");
+  });
+
   it("compresses JSON request bodies when enabled", async () => {
     const handler = new RecordingHandler(() => ({}));
     const client = new AlternatorDynamoDBClient({

@@ -325,5 +325,10 @@ function defaultAllowedHeaders(noAuth: boolean): readonly string[] {
   if (noAuth) {
     return DEFAULT_ALLOWED_HEADERS;
   }
-  return [...DEFAULT_ALLOWED_HEADERS, "Authorization", "X-Amz-Date"];
+  return [
+    ...DEFAULT_ALLOWED_HEADERS,
+    "Authorization",
+    "X-Amz-Date",
+    "X-Amz-Security-Token",
+  ];
 }
