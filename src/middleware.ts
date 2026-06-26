@@ -69,7 +69,7 @@ export function createAlternatorPostSigningMiddleware<Input extends object, Outp
     const request = HttpRequest.clone(args.request);
 
     if (config.headerOptimization.enabled) {
-      request.headers = whitelistHeaders(request.headers, config.headerOptimization.allowedHeaders);
+      request.headers = whitelistHeaders(request.headers, optimizedAllowedHeaders(request.headers, config));
     } else if (config.noAuth) {
       request.headers = removeHeaders(request.headers, [
         "authorization",
@@ -86,6 +86,21 @@ export function createAlternatorPostSigningMiddleware<Input extends object, Outp
       request,
     });
   };
+}
+
+function optimizedAllowedHeaders(
+  headers: Record<string, string | undefined>,
+  config: NormalizedAlternatorConfig,
+): readonly string[] {
+  if (config.noAuth) {
+    return config.headerOptimization.allowedHeaders;
+  }
+
+  return [
+    ...config.headerOptimization.allowedHeaders,
+    "authorization",
+    ...signedHeaderNames(headers),
+  ];
 }
 
 function getOrCreateQueryPlan<Input extends object>(
@@ -122,6 +137,26 @@ function whitelistHeaders(
   }
 
   return nextHeaders;
+}
+
+function signedHeaderNames(headers: Record<string, string | undefined>): string[] {
+  const authorization = headerValue(headers, "authorization");
+  if (!authorization) {
+    return [];
+  }
+
+  const match = /(?:^|,\s*)SignedHeaders=([^,\s]+)/.exec(authorization);
+  return match?.[1]?.split(";").filter(Boolean) ?? [];
+}
+
+function headerValue(headers: Record<string, string | undefined>, name: string): string | undefined {
+  const target = name.toLowerCase();
+  for (const [headerName, value] of Object.entries(headers)) {
+    if (headerName.toLowerCase() === target) {
+      return value;
+    }
+  }
+  return undefined;
 }
 
 function removeHeaders(

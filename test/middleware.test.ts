@@ -83,7 +83,7 @@ describe("Alternator middleware", () => {
     expect(request?.headers.authorization).toContain("Credential=key/");
   });
 
-  it("keeps whitelist auth headers when credentials and header optimization are enabled", async () => {
+  it("keeps SigV4 signed headers when credentials and header optimization are enabled", async () => {
     const handler = new RecordingHandler(() => ({ TableNames: [] }));
     const client = new AlternatorDynamoDBClient({
       seeds: ["seed"],
@@ -101,8 +101,10 @@ describe("Alternator middleware", () => {
     const headers = commandRequests(handler)[0]?.headers ?? {};
     expect(headers.authorization).toContain("AWS4-HMAC-SHA256");
     expect(headers["x-amz-date"]).toBeDefined();
-    expect(headers["x-amz-content-sha256"]).toBeUndefined();
-    expect(headers["content-type"]).toBeUndefined();
+
+    for (const name of signedHeaderNames(headers.authorization)) {
+      expect(headers[name]).toBeDefined();
+    }
   });
 
   it("compresses JSON request bodies when enabled", async () => {
@@ -257,3 +259,8 @@ describe("Alternator middleware", () => {
     expect(client.getPartitionKeyName("users")).toBe("id");
   });
 });
+
+function signedHeaderNames(authorization: string | undefined): string[] {
+  const match = authorization?.match(/(?:^|,\s*)SignedHeaders=([^,\s]+)/);
+  return match?.[1]?.split(";").filter(Boolean) ?? [];
+}
