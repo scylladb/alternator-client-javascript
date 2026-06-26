@@ -12,13 +12,17 @@ type InternalDocumentClientConstructor = new (
 ) => AlternatorDynamoDBDocumentClient;
 
 export class AlternatorDynamoDBDocumentClient extends DynamoDBDocumentClient {
+  private readonly ownedClient: AlternatorDynamoDBClient | undefined;
+
   constructor(config: AlternatorDynamoDBClientConfig, translateConfig?: TranslateConfig);
   constructor(configOrClient: AlternatorDynamoDBClientConfig | DynamoDBClient, translateConfig?: TranslateConfig) {
+    let ownedClient: AlternatorDynamoDBClient | undefined;
     const client =
       configOrClient instanceof DynamoDBClient
         ? configOrClient
-        : new AlternatorDynamoDBClient(configOrClient);
+        : (ownedClient = new AlternatorDynamoDBClient(configOrClient));
     super(client, translateConfig);
+    this.ownedClient = ownedClient;
   }
 
   static override from(
@@ -28,6 +32,11 @@ export class AlternatorDynamoDBDocumentClient extends DynamoDBDocumentClient {
     const InternalDocumentClient =
       AlternatorDynamoDBDocumentClient as unknown as InternalDocumentClientConstructor;
     return new InternalDocumentClient(client, translateConfig);
+  }
+
+  override destroy(): void {
+    this.ownedClient?.destroy();
+    super.destroy();
   }
 }
 
