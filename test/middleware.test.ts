@@ -2,6 +2,7 @@ import { ListTablesCommand, PutItemCommand } from "@aws-sdk/client-dynamodb";
 import { gunzipSync } from "node:zlib";
 import { describe, expect, it, vi } from "vitest";
 import { AlternatorDynamoDBClient } from "../src/index.js";
+import { alternatorUserAgentToken } from "../src/user-agent.js";
 import { commandRequests, jsonResponse, RecordingHandler } from "./helpers.js";
 
 describe("Alternator middleware", () => {
@@ -149,6 +150,73 @@ describe("Alternator middleware", () => {
     expect(headers["x-amz-date"]).toBeUndefined();
     expect(headers["content-type"]).toBeUndefined();
     expect(headers.connection).toBeUndefined();
+  });
+
+  it("replaces the SDK User-Agent with the Alternator client identity by default", async () => {
+    const handler = new RecordingHandler(() => ({ TableNames: [] }));
+    const client = new AlternatorDynamoDBClient({
+      seeds: ["seed"],
+      requestHandler: handler,
+      discovery: { background: false },
+      customUserAgent: "app/1",
+    });
+
+    await client.send(new ListTablesCommand({}));
+
+    const headers = commandRequests(handler)[0]?.headers ?? {};
+    expect(headers["user-agent"]).toBe(alternatorUserAgentToken());
+    expect(headers["user-agent"]).not.toContain("app/1");
+  });
+
+  it("supports replacing, transforming, and removing the Alternator User-Agent", async () => {
+    const replacements = new RecordingHandler(() => ({ TableNames: [] }));
+    const transformed = new RecordingHandler(() => ({ TableNames: [] }));
+    const removed = new RecordingHandler(() => ({ TableNames: [] }));
+
+    const replacementClient = new AlternatorDynamoDBClient({
+      seeds: ["seed"],
+      requestHandler: replacements,
+      discovery: { background: false },
+      userAgent: "custom-client/1.2.3",
+    });
+    const transformedClient = new AlternatorDynamoDBClient({
+      seeds: ["seed"],
+      requestHandler: transformed,
+      discovery: { background: false },
+      userAgent: (userAgent) => `${userAgent} app/4.5.6`,
+    });
+    const removedClient = new AlternatorDynamoDBClient({
+      seeds: ["seed"],
+      requestHandler: removed,
+      discovery: { background: false },
+      userAgent: false,
+    });
+
+    await replacementClient.send(new ListTablesCommand({}));
+    await transformedClient.send(new ListTablesCommand({}));
+    await removedClient.send(new ListTablesCommand({}));
+
+    expect(commandRequests(replacements)[0]?.headers["user-agent"]).toBe("custom-client/1.2.3");
+    expect(commandRequests(transformed)[0]?.headers["user-agent"]).toBe(
+      `${alternatorUserAgentToken()} app/4.5.6`,
+    );
+    expect(commandRequests(removed)[0]?.headers["user-agent"]).toBeUndefined();
+  });
+
+  it("keeps the generated User-Agent when header optimization is enabled", async () => {
+    const handler = new RecordingHandler(() => ({ TableNames: [] }));
+    const client = new AlternatorDynamoDBClient({
+      seeds: ["seed"],
+      requestHandler: handler,
+      discovery: { background: false },
+      headerOptimization: true,
+    });
+
+    await client.send(new ListTablesCommand({}));
+
+    const headers = commandRequests(handler)[0]?.headers ?? {};
+    expect(headers["user-agent"]).toBe(alternatorUserAgentToken());
+    expect(headers["content-type"]).toBeUndefined();
   });
 
   it("routes matching keys to the same node when key affinity is enabled", async () => {

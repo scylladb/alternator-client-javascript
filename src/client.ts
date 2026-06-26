@@ -119,6 +119,7 @@ function buildDynamoConfig(
     runtime: _runtime,
     compression: _compression,
     headerOptimization: _headerOptimization,
+    userAgent: _userAgent,
     keyRouteAffinity: _keyRouteAffinity,
     tls: _tls,
     discovery: _discovery,

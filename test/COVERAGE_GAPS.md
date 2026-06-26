@@ -37,6 +37,7 @@ integration tests:
 - Config validation for seeds, scheme, port, runtime, connection options, headers, compression, and TLS.
 - `/localnodes` discovery, rack/datacenter query fallback, request-triggered edge discovery, and live-node access.
 - Alternator middleware request rewriting, retry node selection, no-auth header stripping, SigV4 preservation, header whitelisting, and gzip request compression.
+- User-agent replacement, customization, transform, removal, and preservation with header optimization.
 - Query-plan ordering, seeded random ordering, and retry distribution behavior.
 - Murmur3 and AttributeValue hash vectors shared with the Java tests.
 - Key-route affinity classification for write and read-before-write operations.
@@ -63,4 +64,3 @@ feature surface:
 - Exact TCP socket-count assertions using `ss` filtered by JVM PID. The JS suite covers the
   equivalent externally visible behavior: repeated discovery refreshes, serial requests, parallel
   requests, idle gaps, and bounded socket-pool configuration.
-- Java user-agent wrapper classes. The JS package does not add a separate user-agent HTTP wrapper.

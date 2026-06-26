@@ -16,6 +16,9 @@ export type {
   AlternatorRequestCompressor,
   AlternatorRequestCompressorResult,
   AlternatorTlsOptions,
+  AlternatorUserAgentConfig,
+  AlternatorUserAgentOptions,
+  AlternatorUserAgentTransformer,
 } from "./types.js";
 export type {
   ClusterRoutingRule,

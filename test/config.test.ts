@@ -63,4 +63,25 @@ describe("AlternatorDynamoDBClient config", () => {
         }),
     ).toThrow(/socket pool/);
   });
+
+  it("validates User-Agent options", () => {
+    expect(
+      () =>
+        new AlternatorDynamoDBClient({
+          seeds: ["localhost"],
+          userAgent: "",
+        }),
+    ).toThrow(/userAgent/);
+
+    expect(
+      () =>
+        new AlternatorDynamoDBClient({
+          seeds: ["localhost"],
+          userAgent: {
+            value: "custom/1",
+            transform: (userAgent) => `${userAgent} app/1`,
+          },
+        }),
+    ).toThrow(/cannot both be set/);
+  });
 });

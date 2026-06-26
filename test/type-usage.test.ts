@@ -25,6 +25,7 @@ describe("public type usage", () => {
         enabled: true,
         gzipLevel: -1,
       },
+      userAgent: (userAgent) => `${userAgent} app/1.0.0`,
       keyRouteAffinity: {
         type: "read-before-write",
         partitionKeys: {
