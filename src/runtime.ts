@@ -51,7 +51,7 @@ export function createRequestHandler(
     return new FetchHttpHandler(fetchOptions);
   }
 
-  return new LazyNodeHttpHandler(() => buildNodeHandlerOptions(config)) as HttpHandlerUserInput;
+  return new LazyNodeHttpHandler(() => buildNodeHandlerOptions(config));
 }
 
 class LazyNodeHttpHandler implements Handler {
@@ -88,7 +88,7 @@ class LazyNodeHttpHandler implements Handler {
     if (this.delegate && "httpHandlerConfigs" in this.delegate) {
       return this.delegate.httpHandlerConfigs?.() ?? {};
     }
-    return Object.fromEntries(this.pendingUpdates) as NodeHttpHandlerOptions;
+    return Object.fromEntries(this.pendingUpdates);
   }
 
   private async getDelegate(): Promise<Handler> {

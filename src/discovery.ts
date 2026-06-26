@@ -168,7 +168,10 @@ export class AlternatorDiscovery {
         });
       }
     }
-    throw lastError ?? new Error("no Alternator seed hosts are available");
+    if (lastError instanceof Error) {
+      throw lastError;
+    }
+    throw new Error(lastError === undefined ? "no Alternator seed hosts are available" : errorMessage(lastError));
   }
 
   private async fetchLocalNodes(host: string, query: LocalNodesQuery): Promise<string[]> {
@@ -251,5 +254,26 @@ function routingRuleLabel(rule: RoutingRule): string {
 }
 
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  if (error instanceof Error) {
+    return error.message;
+  }
+  if (typeof error === "object" && error !== null) {
+    return JSON.stringify(error) ?? Object.prototype.toString.call(error);
+  }
+  switch (typeof error) {
+    case "bigint":
+    case "number":
+      return error.toString();
+    case "boolean":
+      return error ? "true" : "false";
+    case "function":
+      return error.name ? `[function ${error.name}]` : "[function]";
+    case "symbol":
+      return error.description ?? error.toString();
+    case "string":
+      return error;
+    case "undefined":
+      return "undefined";
+  }
+  return "unknown";
 }
