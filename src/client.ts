@@ -130,13 +130,16 @@ function buildDynamoConfig(
     ...awsConfig
   } = input;
 
-  const dynamoConfig: DynamoDBClientConfig = {
+  const dynamoConfig: DynamoDBClientConfig & { applyChecksum?: boolean } = {
     ...awsConfig,
     endpoint: firstEndpointUrl(alternatorConfig),
     region: region ?? DEFAULT_REGION,
     credentials: credentials ?? NO_AUTH_CREDENTIALS,
     requestHandler,
   };
+  if (alternatorConfig.headerOptimization.enabled) {
+    dynamoConfig.applyChecksum = false;
+  }
   return dynamoConfig;
 }
 
