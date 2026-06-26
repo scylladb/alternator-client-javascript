@@ -166,4 +166,27 @@ describe("AlternatorDynamoDBClient config", () => {
         }),
     ).toThrow(/routing\.fallback\.rack/);
   });
+
+  it("validates gzip compression level against zlib range", () => {
+    expect(
+      () =>
+        new AlternatorDynamoDBClient({
+          seeds: ["localhost"],
+          compression: {
+            enabled: true,
+            gzipLevel: -2,
+          },
+        }),
+    ).toThrow(/gzipLevel/);
+
+    expect(
+      new AlternatorDynamoDBClient({
+        seeds: ["localhost"],
+        compression: {
+          enabled: true,
+          gzipLevel: -1,
+        },
+      }).alternatorConfig.compression.gzipLevel,
+    ).toBe(-1);
+  });
 });

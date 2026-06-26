@@ -197,8 +197,8 @@ function normalizeCompression(input: AlternatorDynamoDBClientConfig["compression
     ...(input?.gzipLevel !== undefined ? { gzipLevel: input.gzipLevel } : {}),
     ...(input?.compressor ? { compressor: input.compressor } : {}),
   };
-  if (normalized.gzipLevel !== undefined && (normalized.gzipLevel < -2 || normalized.gzipLevel > 9)) {
-    throw new TypeError("compression.gzipLevel must be between -2 and 9");
+  if (normalized.gzipLevel !== undefined && (normalized.gzipLevel < -1 || normalized.gzipLevel > 9)) {
+    throw new TypeError("compression.gzipLevel must be between -1 and 9");
   }
   return normalized;
 }
