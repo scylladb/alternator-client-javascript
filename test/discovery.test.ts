@@ -37,6 +37,62 @@ describe("Alternator discovery", () => {
     ]);
   });
 
+  it("unions cluster discovery across configured seeds", async () => {
+    const handler = new RecordingHandler((request) => {
+      if (request.path !== "/localnodes") {
+        return {};
+      }
+      if (request.hostname === "seed-dc1.internal") {
+        return ["dc1-a.internal", "dc1-b.internal"];
+      }
+      if (request.hostname === "seed-dc2.internal") {
+        return ["dc2-a.internal", "dc2-b.internal"];
+      }
+      return [];
+    });
+    const client = new AlternatorDynamoDBClient({
+      seeds: ["seed-dc1.internal", "seed-dc2.internal"],
+      requestHandler: handler,
+      discovery: { background: false },
+      routing: routing.cluster(),
+    });
+
+    await client.refreshLiveNodes();
+
+    expect(client.getLiveNodes().map((node) => node.host)).toEqual([
+      "dc1-a.internal",
+      "dc1-b.internal",
+      "dc2-a.internal",
+      "dc2-b.internal",
+    ]);
+    expect(handler.requests.map((request) => request.query)).toEqual([{}, {}]);
+  });
+
+  it("queries named datacenters for cluster discovery", async () => {
+    const seenQueries: Array<Record<string, unknown>> = [];
+    const handler = new RecordingHandler((request) => {
+      seenQueries.push(request.query);
+      if (request.query.dc === "dc1") {
+        return ["dc1-node"];
+      }
+      if (request.query.dc === "dc2") {
+        return ["dc2-node"];
+      }
+      return [];
+    });
+    const client = new AlternatorDynamoDBClient({
+      seeds: ["seed"],
+      requestHandler: handler,
+      discovery: { background: false },
+      routing: routing.cluster({ datacenters: ["dc1", "dc2"] }),
+    });
+
+    await client.refreshLiveNodes();
+
+    expect(seenQueries).toEqual([{ dc: "dc1" }, { dc: "dc2" }]);
+    expect(client.getLiveNodes().map((node) => node.host)).toEqual(["dc1-node", "dc2-node"]);
+  });
+
   it("tries rack/datacenter routing fallback in order", async () => {
     const seenQueries: Array<Record<string, unknown>> = [];
     const handler = new RecordingHandler((request) => {
@@ -99,6 +155,19 @@ describe("Alternator discovery", () => {
     });
     await expect(valid.checkIfRackAndDatacenterSetCorrectly()).resolves.toBeUndefined();
 
+    const validCluster = new AlternatorDynamoDBClient({
+      seeds: ["seed"],
+      requestHandler: new RecordingHandler((request) => {
+        if (request.query.dc === "dc1") {
+          return ["dc-node"];
+        }
+        return [];
+      }),
+      discovery: { background: false },
+      routing: routing.cluster({ datacenters: ["dc1"] }),
+    });
+    await expect(validCluster.checkIfRackAndDatacenterSetCorrectly()).resolves.toBeUndefined();
+
     const invalid = new AlternatorDynamoDBClient({
       seeds: ["seed"],
       requestHandler: new RecordingHandler(() => []),
@@ -108,6 +177,14 @@ describe("Alternator discovery", () => {
       }),
     });
     await expect(invalid.validateRackDatacenterConfig()).rejects.toThrow(/has no nodes/);
+
+    const invalidCluster = new AlternatorDynamoDBClient({
+      seeds: ["seed"],
+      requestHandler: new RecordingHandler(() => []),
+      discovery: { background: false },
+      routing: routing.cluster({ datacenters: ["dc1"] }),
+    });
+    await expect(invalidCluster.validateRackDatacenterConfig()).rejects.toThrow(/datacenter\(s\): dc1/);
   });
 
   it("uses request-triggered discovery in edge runtime", async () => {
