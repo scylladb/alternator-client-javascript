@@ -28,9 +28,10 @@
   "sideEffects": false,
   "scripts": {
     "build": "tsup src/index.ts src/document.ts --format esm,cjs --dts --sourcemap --clean",
+    "lint": "eslint . --max-warnings=0",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "verify": "npm run typecheck && npm run test && npm run build"
+    "verify": "npm run typecheck && npm run lint && npm run test && npm run build"
   },
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.1075.0",
@@ -41,9 +42,13 @@
     "@smithy/types": "^4.15.0"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/node": "^24.0.0",
+    "eslint": "^10.5.0",
+    "globals": "^17.7.0",
     "tsup": "^8.5.1",
     "typescript": "^6.0.3",
+    "typescript-eslint": "^8.62.0",
     "vitest": "^4.1.9"
   },
   "peerDependencies": {

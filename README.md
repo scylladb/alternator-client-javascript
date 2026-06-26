@@ -223,6 +223,7 @@ plan is exhausted.
 
 ```sh
 npm run typecheck
+npm run lint
 npm test
 npm run build
 npm run verify

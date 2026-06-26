@@ -5,7 +5,7 @@ import { Readable } from "node:stream";
 export type HandlerResponder = (
   request: HttpRequest,
   options?: HttpHandlerOptions,
-) => unknown | Promise<unknown>;
+) => unknown;
 
 export class RecordingHandler {
   readonly metadata = { handlerProtocol: "http/1.1" };
@@ -48,7 +48,7 @@ export function jsonResponse(payload: unknown, statusCode = 200): HttpResponse {
 }
 
 export async function requestBodyJson(request: HttpRequest): Promise<unknown> {
-  const body = request.body;
+  const body: unknown = request.body;
   if (typeof body === "string") {
     return JSON.parse(body);
   }

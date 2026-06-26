@@ -40,7 +40,23 @@ export async function bodyToString(body: unknown): Promise<string> {
     return new TextDecoder().decode(bytes);
   }
 
-  return String(body);
+  if (typeof body === "object") {
+    return JSON.stringify(body) ?? Object.prototype.toString.call(body);
+  }
+  switch (typeof body) {
+    case "bigint":
+    case "number":
+      return body.toString();
+    case "boolean":
+      return body ? "true" : "false";
+    case "function":
+      return body.name ? `[function ${body.name}]` : "[function]";
+    case "symbol":
+      return body.description ?? body.toString();
+    case "undefined":
+      return "";
+  }
+  return "";
 }
 
 export function bodyToBytes(body: unknown): Uint8Array | undefined {
