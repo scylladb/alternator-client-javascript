@@ -3,6 +3,9 @@ import { AlternatorDynamoDBClient, routing } from "../src/index.js";
 import { RecordingHandler } from "./helpers.js";
 import { ListTablesCommand } from "@aws-sdk/client-dynamodb";
 
+const missingDatacenterQuery = { dc: "__alternator_client_missing_dc__" };
+const missingRackQuery = { rack: "__alternator_client_missing_rack__" };
+
 describe("Alternator discovery", () => {
   it("refreshes live nodes from /localnodes", async () => {
     const handler = new RecordingHandler((request) => {
@@ -80,6 +83,9 @@ describe("Alternator discovery", () => {
     const seenQueries: Array<Record<string, unknown>> = [];
     const handler = new RecordingHandler((request) => {
       seenQueries.push(request.query);
+      if (request.query.dc === missingDatacenterQuery.dc || request.query.rack === missingRackQuery.rack) {
+        return [];
+      }
       if (request.query.rack) {
         return [];
       }
@@ -102,6 +108,8 @@ describe("Alternator discovery", () => {
     await client.refreshLiveNodes();
 
     expect(seenQueries).toEqual([
+      missingDatacenterQuery,
+      missingRackQuery,
       { dc: "dc1", rack: "rack1" },
       { dc: "dc1" },
     ]);
@@ -111,7 +119,7 @@ describe("Alternator discovery", () => {
   it("detects rack/datacenter query support", async () => {
     const supported = new AlternatorDynamoDBClient({
       seeds: ["seed"],
-      requestHandler: new RecordingHandler((request) => (request.query.dc ? [] : ["seed"])),
+      requestHandler: new RecordingHandler((request) => (request.query.dc || request.query.rack ? [] : ["seed"])),
       discovery: { background: false },
     });
     await expect(supported.checkRackDatacenterSupport()).resolves.toBe(true);
@@ -122,6 +130,74 @@ describe("Alternator discovery", () => {
       discovery: { background: false },
     });
     await expect(unsupported.checkRackDatacenterSupport()).resolves.toBe(false);
+  });
+
+  it("falls back instead of accepting scoped nodes when rack/datacenter filters are unsupported", async () => {
+    const seenQueries: Array<Record<string, unknown>> = [];
+    const handler = new RecordingHandler((request) => {
+      seenQueries.push(request.query);
+      if (request.query.dc || request.query.rack) {
+        return ["wrong-scope-node"];
+      }
+      return ["cluster-node"];
+    });
+    const client = new AlternatorDynamoDBClient({
+      seeds: ["seed"],
+      requestHandler: handler,
+      discovery: { background: false },
+      routing: routing.rack("dc1", "rack1", {
+        fallback: routing.datacenter("dc1", {
+          fallback: routing.cluster(),
+        }),
+      }),
+    });
+
+    await client.refreshLiveNodes();
+
+    expect(seenQueries).toEqual([
+      missingDatacenterQuery,
+      {},
+    ]);
+    expect(client.getLiveNodes().map((node) => node.host)).toEqual(["cluster-node"]);
+  });
+
+  it("falls back from rack scope to datacenter scope when only rack filters are unsupported", async () => {
+    const seenQueries: Array<Record<string, unknown>> = [];
+    const handler = new RecordingHandler((request) => {
+      seenQueries.push(request.query);
+      if (request.query.dc === missingDatacenterQuery.dc) {
+        return [];
+      }
+      if (request.query.rack === missingRackQuery.rack) {
+        return ["dc-node"];
+      }
+      if (request.query.rack) {
+        return ["wrong-rack-node"];
+      }
+      if (request.query.dc === "dc1") {
+        return ["dc-node"];
+      }
+      return ["cluster-node"];
+    });
+    const client = new AlternatorDynamoDBClient({
+      seeds: ["seed"],
+      requestHandler: handler,
+      discovery: { background: false },
+      routing: routing.rack("dc1", "rack1", {
+        fallback: routing.datacenter("dc1", {
+          fallback: routing.cluster(),
+        }),
+      }),
+    });
+
+    await client.refreshLiveNodes();
+
+    expect(seenQueries).toEqual([
+      missingDatacenterQuery,
+      missingRackQuery,
+      { dc: "dc1" },
+    ]);
+    expect(client.getLiveNodes().map((node) => node.host)).toEqual(["dc-node"]);
   });
 
   it("validates configured rack/datacenter scopes", async () => {
@@ -147,6 +223,19 @@ describe("Alternator discovery", () => {
       }),
     });
     await expect(invalid.validateRackDatacenterConfig()).rejects.toThrow(/has no nodes/);
+  });
+
+  it("rejects rack/datacenter validation when scope filters are unsupported", async () => {
+    const client = new AlternatorDynamoDBClient({
+      seeds: ["seed"],
+      requestHandler: new RecordingHandler(() => ["seed"]),
+      discovery: { background: false },
+      routing: routing.datacenter("dc1", {
+        fallback: routing.cluster(),
+      }),
+    });
+
+    await expect(client.validateRackDatacenterConfig()).rejects.toThrow(/does not support datacenter/);
   });
 
   it("uses request-triggered discovery in edge runtime", async () => {
