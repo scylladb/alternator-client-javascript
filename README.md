@@ -93,7 +93,6 @@ balancing unless the passed client is already an `AlternatorDynamoDBClient`.
 ```ts
 client.getLiveNodes();
 await client.refreshLiveNodes();
-client.nextNode();
 await client.checkRackDatacenterSupport();
 await client.checkIfRackAndDatacenterSetCorrectly();
 await client.validateRackDatacenterConfig();
@@ -225,6 +224,28 @@ plan is exhausted.
 npm run typecheck
 npm run lint
 npm test
+npm run test:integration
 npm run build
 npm run verify
+make test-all
 ```
+
+`npm test` runs the fast unit suite. Integration tests live under
+`test/integration-test` and are skipped unless `INTEGRATION_TESTS` is truthy:
+
+```sh
+INTEGRATION_TESTS=true \
+ALTERNATOR_HOST=172.39.0.2 \
+ALTERNATOR_PORT=9998 \
+ALTERNATOR_HTTPS_PORT=9999 \
+ALTERNATOR_DATACENTER=datacenter1 \
+ALTERNATOR_RACK=rack1 \
+npm run test:integration
+```
+
+For custom CA HTTPS coverage, also set `ALTERNATOR_CA_CERT_PATH` to a PEM CA
+certificate path.
+
+`make test-all` starts the same three-node ScyllaDB Docker cluster shape used by
+the Java client tests, waits for Alternator, runs `npm run test:integration`
+with the required environment variables, and stops the cluster.

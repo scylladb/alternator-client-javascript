@@ -12,7 +12,6 @@ interface DiscoveryRequestHandler {
 
 export class AlternatorDiscovery {
   private liveHosts: string[];
-  private cursor = 0;
   private refreshTimer: ReturnType<typeof setInterval> | undefined;
   private lastRefreshAttempt = 0;
   private inFlightRefresh: Promise<AlternatorNode[]> | undefined;
@@ -36,17 +35,6 @@ export class AlternatorDiscovery {
 
   createQueryPlan(preferredNode?: AlternatorNode): AlternatorQueryPlan {
     return new AlternatorQueryPlan(this.getLiveNodes(), [], preferredNode);
-  }
-
-  nextNode(): AlternatorNode {
-    const liveHosts = this.liveHosts.length > 0 ? this.liveHosts : [...this.config.seeds];
-    const index = this.cursor++ % liveHosts.length;
-
-    const host = liveHosts[index];
-    if (!host) {
-      throw new Error("Alternator has no live nodes or seeds configured");
-    }
-    return this.toNode(host);
   }
 
   async refreshLiveNodes(): Promise<AlternatorNode[]> {
@@ -132,7 +120,6 @@ export class AlternatorDiscovery {
           const nodes = await this.fetchLocalNodes(host, query);
           if (nodes.length > 0) {
             this.liveHosts = normalizeDiscoveredHosts(nodes);
-            this.cursor = this.cursor % this.liveHosts.length;
             return this.getLiveNodes();
           }
           this.config.logger.debug?.("alternator discovery: localnodes returned no nodes", { host, query });

@@ -10,6 +10,9 @@ on:
 permissions:
   contents: read
 
+env:
+  IS_CICD: 1
+
 jobs:
   verify:
     name: Verify (Node ${{ matrix.node-version }})
@@ -37,6 +40,31 @@ jobs:
 
       - name: Verify package
         run: npm run verify
+
+      - name: Cache Docker image
+        id: docker-cache
+        uses: actions/cache@v5
+        with:
+          path: .docker-cache
+          key: scylla-docker-${{ hashFiles('test/docker-compose.yml') }}
+
+      - name: Save Docker image to cache
+        if: steps.docker-cache.outputs.cache-hit != 'true'
+        run: make docker-cache-save
+
+      - name: Cache certificates
+        id: cert-cache
+        uses: actions/cache@v5
+        with:
+          path: .cert-cache
+          key: scylla-certs-${{ hashFiles('Makefile') }}
+
+      - name: Save certificates to cache
+        if: steps.cert-cache.outputs.cache-hit != 'true'
+        run: make cert-cache-save
+
+      - name: Run integration tests
+        run: make test-all
 
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=moderate
