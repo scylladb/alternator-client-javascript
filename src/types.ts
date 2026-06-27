@@ -21,25 +21,35 @@ export interface AlternatorNode {
   readonly url: string;
 }
 
-export interface AlternatorCompressionOptions {
+export interface AlternatorRequestCompressionOptions {
   enabled?: boolean;
   thresholdBytes?: number;
   gzipLevel?: number;
   compressor?: AlternatorRequestCompressor;
 }
 
+export type AlternatorRequestCompressionConfig = boolean | AlternatorRequestCompressionOptions;
+
 export const ResponseCompressionGzip = "gzip" as const;
 export const ResponseCompressionDeflate = "deflate" as const;
 
-export type AlternatorResponseCompression =
+export type AlternatorResponseCompressionAlgorithm =
   | typeof ResponseCompressionGzip
   | typeof ResponseCompressionDeflate;
 
-export type ResponseCompression = AlternatorResponseCompression;
+export type AlternatorResponseCompression = AlternatorResponseCompressionAlgorithm;
+export type ResponseCompression = AlternatorResponseCompressionAlgorithm;
 
 export interface AlternatorResponseCompressionOptions {
   enabled?: boolean;
-  encodings?: readonly AlternatorResponseCompression[];
+  algorithms?: readonly AlternatorResponseCompressionAlgorithm[];
+}
+
+export type AlternatorResponseCompressionConfig = boolean | AlternatorResponseCompressionOptions;
+
+export interface AlternatorCompressionOptions {
+  request?: AlternatorRequestCompressionConfig;
+  response?: AlternatorResponseCompressionConfig;
 }
 
 export interface AlternatorRequestCompressorResult {
@@ -125,8 +135,7 @@ export interface AlternatorDynamoDBClientConfig extends BaseDynamoDBClientConfig
   credentials?: DynamoDBClientConfig["credentials"];
   runtime?: AlternatorRuntime;
   requestHandler?: DynamoDBClientConfig["requestHandler"];
-  compression?: boolean | AlternatorCompressionOptions;
-  responseCompression?: boolean | AlternatorResponseCompressionOptions;
+  compression?: AlternatorCompressionOptions;
   headerOptimization?: boolean | AlternatorHeaderOptimizationOptions;
   userAgent?: AlternatorUserAgentConfig;
   keyRouteAffinity?: boolean | AlternatorKeyRouteAffinityOptions;
@@ -136,7 +145,7 @@ export interface AlternatorDynamoDBClientConfig extends BaseDynamoDBClientConfig
   endpoint?: never;
 }
 
-export interface NormalizedCompressionOptions {
+export interface NormalizedRequestCompressionOptions {
   readonly enabled: boolean;
   readonly thresholdBytes: number;
   readonly gzipLevel?: number;
@@ -145,7 +154,12 @@ export interface NormalizedCompressionOptions {
 
 export interface NormalizedResponseCompressionOptions {
   readonly enabled: boolean;
-  readonly encodings: readonly AlternatorResponseCompression[];
+  readonly algorithms: readonly AlternatorResponseCompressionAlgorithm[];
+}
+
+export interface NormalizedCompressionOptions {
+  readonly request: NormalizedRequestCompressionOptions;
+  readonly response: NormalizedResponseCompressionOptions;
 }
 
 export interface NormalizedHeaderOptimizationOptions {
@@ -178,7 +192,6 @@ export interface NormalizedAlternatorConfig {
   readonly routing: RoutingRule;
   readonly runtime: AlternatorRuntime;
   readonly compression: NormalizedCompressionOptions;
-  readonly responseCompression: NormalizedResponseCompressionOptions;
   readonly headerOptimization: NormalizedHeaderOptimizationOptions;
   readonly userAgent: NormalizedUserAgentOptions;
   readonly keyRouteAffinity: NormalizedKeyRouteAffinityOptions;

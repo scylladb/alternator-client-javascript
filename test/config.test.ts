@@ -50,6 +50,16 @@ describe("AlternatorDynamoDBClient config", () => {
 
     await client.send(new ListTablesCommand({}));
     expect(handler.requests.at(-1)?.hostname).toBe("localhost");
+    expect(client.alternatorConfig.compression).toEqual({
+      request: {
+        enabled: false,
+        thresholdBytes: 0,
+      },
+      response: {
+        enabled: false,
+        algorithms: [],
+      },
+    });
   });
 
   it("rejects unsupported edge-only runtime combinations", () => {
@@ -207,77 +217,98 @@ describe("AlternatorDynamoDBClient config", () => {
         new AlternatorDynamoDBClient({
           seeds: ["localhost"],
           compression: {
-            enabled: true,
-            gzipLevel: -2,
+            request: {
+              enabled: true,
+              gzipLevel: -2,
+            },
           },
         }),
-    ).toThrow(/gzipLevel/);
+    ).toThrow(/compression\.request\.gzipLevel/);
+
+    expect(
+      () =>
+        new AlternatorDynamoDBClient({
+          seeds: ["localhost"],
+          compression: {
+            enabled: true,
+            gzipLevel: -2,
+          } as never,
+        }),
+    ).toThrow(/compression\.enabled/);
 
     expect(
       new AlternatorDynamoDBClient({
         seeds: ["localhost"],
         compression: {
-          enabled: true,
-          gzipLevel: -1,
+          request: {
+            enabled: true,
+            gzipLevel: -1,
+          },
         },
-      }).alternatorConfig.compression.gzipLevel,
+      }).alternatorConfig.compression.request.gzipLevel,
     ).toBe(-1);
   });
 
-  it("normalizes and validates response compression encodings", () => {
+  it("normalizes and validates response compression algorithms", () => {
     expect(
       new AlternatorDynamoDBClient({
         seeds: ["localhost"],
-        responseCompression: true,
-      }).alternatorConfig.responseCompression,
+        compression: { response: true },
+      }).alternatorConfig.compression.response,
     ).toEqual({
       enabled: true,
-      encodings: [ResponseCompressionGzip, ResponseCompressionDeflate],
+      algorithms: [ResponseCompressionGzip],
     });
 
     expect(
       new AlternatorDynamoDBClient({
         seeds: ["localhost"],
-        responseCompression: {
-          enabled: true,
-          encodings: [
-            ResponseCompressionDeflate,
-            ResponseCompressionDeflate,
-            ResponseCompressionGzip,
-          ],
+        compression: {
+          response: {
+            enabled: true,
+            algorithms: [
+              ResponseCompressionDeflate,
+              ResponseCompressionDeflate,
+              ResponseCompressionGzip,
+            ],
+          },
         },
-      }).alternatorConfig.responseCompression,
+      }).alternatorConfig.compression.response,
     ).toEqual({
       enabled: true,
-      encodings: [ResponseCompressionDeflate, ResponseCompressionGzip],
+      algorithms: [ResponseCompressionDeflate, ResponseCompressionGzip],
     });
 
     expect(
       new AlternatorDynamoDBClient({
         seeds: ["localhost"],
-        responseCompression: false,
-      }).alternatorConfig.responseCompression.enabled,
+        compression: { response: false },
+      }).alternatorConfig.compression.response.enabled,
     ).toBe(false);
 
     expect(
       new AlternatorDynamoDBClient({
         seeds: ["localhost"],
-        responseCompression: {
-          encodings: [ResponseCompressionGzip],
+        compression: {
+          response: {
+            algorithms: [ResponseCompressionGzip],
+          },
         },
-      }).alternatorConfig.responseCompression.enabled,
+      }).alternatorConfig.compression.response.enabled,
     ).toBe(false);
 
     expect(
       () =>
         new AlternatorDynamoDBClient({
           seeds: ["localhost"],
-          responseCompression: {
-            enabled: true,
-            encodings: ["br"],
+          compression: {
+            response: {
+              enabled: true,
+              algorithms: ["br"],
+            },
           } as never,
         }),
-    ).toThrow(/responseCompression/);
+    ).toThrow(/compression\.response/);
   });
 
   it("validates key route affinity type", () => {

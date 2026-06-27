@@ -29,12 +29,14 @@ describe("public type usage", () => {
         allowedHeaders: ["Host", "X-Amz-Target"],
       },
       compression: {
-        enabled: true,
-        gzipLevel: -1,
-      },
-      responseCompression: {
-        enabled: true,
-        encodings: [ResponseCompressionGzip, ResponseCompressionDeflate],
+        request: {
+          enabled: true,
+          gzipLevel: -1,
+        },
+        response: {
+          enabled: true,
+          algorithms: [ResponseCompressionGzip, ResponseCompressionDeflate],
+        },
       },
       userAgent: (userAgent) => `${userAgent} app/1.0.0`,
       keyRouteAffinity: {

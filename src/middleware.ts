@@ -1,7 +1,7 @@
 import { HttpRequest } from "@smithy/protocol-http";
 import type { FinalizeRequestMiddleware, HandlerExecutionContext } from "@smithy/types";
 import {
-  applyResponseCompressionRequestHeaders,
+  applyResponseEncodingHeaders,
   compressBody,
 } from "./compression.js";
 import { hostForUrl } from "./config.js";
@@ -49,7 +49,7 @@ export function createAlternatorRequestMiddleware<Input extends object, Output e
       request.headers.connection = "keep-alive";
     }
 
-    if (config.compression.enabled) {
+    if (config.compression.request.enabled) {
       request = await maybeCompressRequest(request, config);
     }
 
@@ -74,10 +74,10 @@ export function createAlternatorPostSigningMiddleware<Input extends object, Outp
 
     const request = HttpRequest.clone(args.request);
 
-    if (config.responseCompression.enabled) {
-      request.headers = applyResponseCompressionRequestHeaders(
+    if (config.compression.response.enabled) {
+      request.headers = applyResponseEncodingHeaders(
         request.headers,
-        config.responseCompression.encodings,
+        config.compression.response.algorithms,
       );
     }
 
@@ -179,11 +179,11 @@ async function maybeCompressRequest(
   }
 
   const size = bodySize(request.body);
-  if (size === undefined || size < config.compression.thresholdBytes) {
+  if (size === undefined || size < config.compression.request.thresholdBytes) {
     return request;
   }
 
-  const compressedBody = await compressBody(request.body, config.runtime, config.compression);
+  const compressedBody = await compressBody(request.body, config.runtime, config.compression.request);
   if (!compressedBody) {
     return request;
   }

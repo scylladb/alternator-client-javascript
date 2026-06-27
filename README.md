@@ -151,13 +151,15 @@ new AlternatorDynamoDBClient({
   },
 
   compression: {
-    enabled: true,
-    gzipLevel: -1,
-  },
-
-  responseCompression: {
-    enabled: true,
-    encodings: [ResponseCompressionGzip],
+    request: {
+      enabled: true,
+      thresholdBytes: 1_024,
+      gzipLevel: -1,
+    },
+    response: {
+      enabled: true,
+      algorithms: [ResponseCompressionGzip],
+    },
   },
 
   headerOptimization: {
@@ -231,13 +233,30 @@ new AlternatorDynamoDBClient({
 
 Use `userAgent: false` to remove the header entirely.
 
-Request compression is disabled by default. When enabled, it compresses every
-request body with gzip. Use `gzipLevel` to select the zlib level, or provide
-`compressor` for a custom compressor.
+Request and response compression are disabled by default and configured
+separately:
 
-Response compression is disabled by default. Enable it with
-`responseCompression: true` to accept both supported encodings, or pass an
-options object with an explicit list:
+```ts
+compression: {
+  request: {
+    enabled: true,
+    thresholdBytes: 1_024,
+    gzipLevel: -1,
+  },
+  response: {
+    enabled: true,
+    algorithms: [ResponseCompressionGzip],
+  },
+}
+```
+
+`compression.request: true` compresses every measurable request body with gzip.
+Use `thresholdBytes` to skip smaller request bodies, `gzipLevel` to select the
+zlib level, or `compressor` for a custom request compressor.
+
+`compression.response: true` enables the default response algorithm, `gzip`.
+Pass an options object with an explicit algorithm list to control the
+`Accept-Encoding` value:
 
 ```ts
 import {
@@ -247,15 +266,19 @@ import {
 
 new AlternatorDynamoDBClient({
   seeds: ["scylla-0.internal"],
-  responseCompression: {
-    enabled: true,
-    encodings: [ResponseCompressionGzip, ResponseCompressionDeflate],
+  compression: {
+    response: {
+      enabled: true,
+      algorithms: [ResponseCompressionGzip, ResponseCompressionDeflate],
+    },
   },
 });
 ```
 
 When enabled, the client sends `Accept-Encoding` and transparently decodes
-`gzip` and `deflate` response bodies before the AWS SDK deserializes them.
+`gzip` and `deflate` response bodies before the AWS SDK deserializes them. If
+header optimization uses a custom whitelist, keep `Accept-Encoding` and
+`Content-Encoding` in that list.
 
 Key-route affinity supports these modes:
 

@@ -2,15 +2,15 @@ import { HttpResponse } from "@smithy/protocol-http";
 import { bodyToBytes } from "./body.js";
 import { ResponseCompressionDeflate, ResponseCompressionGzip } from "./types.js";
 import type {
-  AlternatorResponseCompression,
+  AlternatorResponseCompressionAlgorithm,
   AlternatorRuntime,
-  NormalizedCompressionOptions,
+  NormalizedRequestCompressionOptions,
 } from "./types.js";
 
 export async function compressBody(
   body: unknown,
   runtime: AlternatorRuntime,
-  config: NormalizedCompressionOptions,
+  config: NormalizedRequestCompressionOptions,
 ): Promise<{ body: Uint8Array; contentEncoding: string; contentLength: number } | undefined> {
   const bytes = bodyToBytes(body);
   if (!bytes) {
@@ -51,11 +51,11 @@ export async function compressBody(
   };
 }
 
-export function applyResponseCompressionRequestHeaders(
+export function applyResponseEncodingHeaders(
   headers: Record<string, string | undefined>,
-  encodings: readonly AlternatorResponseCompression[],
+  algorithms: readonly AlternatorResponseCompressionAlgorithm[],
 ): Record<string, string> {
-  const acceptEncoding = responseCompressionAcceptEncoding(encodings);
+  const acceptEncoding = responseAcceptEncoding(algorithms);
   if (acceptEncoding === "") {
     return copyDefinedHeaders(headers);
   }
@@ -71,18 +71,18 @@ export function applyResponseCompressionRequestHeaders(
   };
 }
 
-export function responseCompressionAcceptEncoding(
-  encodings: readonly AlternatorResponseCompression[],
+export function responseAcceptEncoding(
+  algorithms: readonly AlternatorResponseCompressionAlgorithm[],
 ): string {
-  const seen = new Set<AlternatorResponseCompression>();
-  const parts: AlternatorResponseCompression[] = [];
+  const seen = new Set<AlternatorResponseCompressionAlgorithm>();
+  const parts: AlternatorResponseCompressionAlgorithm[] = [];
 
-  for (const encoding of encodings) {
-    if (seen.has(encoding)) {
+  for (const algorithm of algorithms) {
+    if (seen.has(algorithm)) {
       continue;
     }
-    seen.add(encoding);
-    parts.push(encoding);
+    seen.add(algorithm);
+    parts.push(algorithm);
   }
 
   return parts.join(", ");
@@ -92,7 +92,7 @@ export async function decompressResponse(
   response: HttpResponse,
   runtime: AlternatorRuntime,
 ): Promise<HttpResponse> {
-  const encoding = responseCompressionContentEncoding(getHeader(response.headers, "content-encoding"));
+  const encoding = responseContentEncoding(getHeader(response.headers, "content-encoding"));
   const body: unknown = response.body;
   if (!encoding || body === undefined || body === null) {
     return response;
@@ -110,7 +110,7 @@ export async function decompressResponse(
 async function decompressResponseBody(
   body: unknown,
   runtime: AlternatorRuntime,
-  encoding: AlternatorResponseCompression,
+  encoding: AlternatorResponseCompressionAlgorithm,
 ): Promise<unknown> {
   if (runtime === "edge") {
     return decompressWebResponseBody(body, encoding);
@@ -120,7 +120,7 @@ async function decompressResponseBody(
 
 async function decompressNodeResponseBody(
   body: unknown,
-  encoding: AlternatorResponseCompression,
+  encoding: AlternatorResponseCompressionAlgorithm,
 ): Promise<unknown> {
   const zlib = await import("node:zlib");
 
@@ -139,7 +139,7 @@ async function decompressNodeResponseBody(
 
 async function decompressWebResponseBody(
   body: unknown,
-  encoding: AlternatorResponseCompression,
+  encoding: AlternatorResponseCompressionAlgorithm,
 ): Promise<unknown> {
   if (typeof DecompressionStream === "undefined") {
     throw new Error("response compression requires DecompressionStream support in edge runtime");
@@ -186,9 +186,7 @@ async function bodyToAsyncBytes(body: unknown): Promise<Uint8Array> {
   throw new Error("compressed response body is not readable");
 }
 
-function responseCompressionContentEncoding(
-  value: string | undefined,
-): AlternatorResponseCompression | undefined {
+function responseContentEncoding(value: string | undefined): AlternatorResponseCompressionAlgorithm | undefined {
   switch (value?.trim().toLowerCase()) {
     case ResponseCompressionGzip:
       return ResponseCompressionGzip;
@@ -241,7 +239,16 @@ function chunkToBytes(chunk: unknown): Uint8Array {
   if (bytes) {
     return bytes;
   }
-  return new TextEncoder().encode(String(chunk));
+  switch (typeof chunk) {
+    case "string":
+      return new TextEncoder().encode(chunk);
+    case "bigint":
+    case "number":
+    case "boolean":
+      return new TextEncoder().encode(String(chunk));
+    default:
+      throw new Error("compressed response body chunk is not readable");
+  }
 }
 
 function concatBytes(chunks: readonly Uint8Array[]): Uint8Array {
