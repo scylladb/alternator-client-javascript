@@ -76,24 +76,7 @@ export const routing = {
   rack,
 };
 
-export function routingQueries(scope: AlternatorRoutingScope): LocalNodesQuery[] {
-  const query = queryForScope(scope);
-  const fallback = "fallback" in scope ? scope.fallback : undefined;
-  return fallback ? [query, ...routingQueries(fallback)] : [query];
-}
-
 export function routingChain(scope: AlternatorRoutingScope): AlternatorRoutingScope[] {
   const fallback = "fallback" in scope ? scope.fallback : undefined;
   return fallback ? [scope, ...routingChain(fallback)] : [scope];
-}
-
-function queryForScope(scope: AlternatorRoutingScope): LocalNodesQuery {
-  switch (scope.kind) {
-    case "cluster":
-      return {};
-    case "datacenter":
-      return { dc: scope.datacenter };
-    case "rack":
-      return { dc: scope.datacenter, rack: scope.rack };
-  }
 }

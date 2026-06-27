@@ -107,8 +107,3 @@ function rotl64(value: bigint, rotate: bigint): bigint {
 function toSigned64(value: bigint): bigint {
   return value >= SIGN_BIT ? value - (1n << 64n) : value;
 }
-
-export function positiveModulo(value: bigint, divisor: number): number {
-  const mod = value % BigInt(divisor);
-  return Number(mod < 0n ? mod + BigInt(divisor) : mod);
-}

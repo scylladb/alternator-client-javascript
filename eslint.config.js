@@ -2,7 +2,7 @@ import js from "@eslint/js";
 import globals from "globals";
 import tseslint from "typescript-eslint";
 
-const tsFiles = ["src/**/*.ts", "test/**/*.ts", "vitest.config.ts"];
+const tsFiles = ["src/**/*.ts", "test/**/*.ts", "vitest.config.ts", "vitest.integration.config.ts", "tsup.config.ts"];
 
 export default tseslint.config(
   {

@@ -1,4 +1,3 @@
-import packageJson from "../package.json" with { type: "json" };
 import type {
   AlternatorUserAgentConfig,
   AlternatorUserAgentOptions,
@@ -6,10 +5,12 @@ import type {
   NormalizedUserAgentOptions,
 } from "./types.js";
 
+declare const __PACKAGE_VERSION__: string;
+
 export const ALTERNATOR_USER_AGENT_PRODUCT = "scylladb-alternator-client-javascript";
 
 export function alternatorUserAgentToken(): string {
-  return `${ALTERNATOR_USER_AGENT_PRODUCT}/${normalizeVersion(packageJson.version)}`;
+  return `${ALTERNATOR_USER_AGENT_PRODUCT}/${normalizeVersion(packageVersion())}`;
 }
 
 export function normalizeUserAgent(input: AlternatorUserAgentConfig | undefined): NormalizedUserAgentOptions {
@@ -103,4 +104,8 @@ function normalizeVersion(version: string | undefined): string {
     return "unknown";
   }
   return trimmed.replace(/\s+/g, "_");
+}
+
+function packageVersion(): string | undefined {
+  return typeof __PACKAGE_VERSION__ === "string" ? __PACKAGE_VERSION__ : undefined;
 }

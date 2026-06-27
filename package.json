@@ -6,17 +6,51 @@
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
+  "browser": "./dist/edge.js",
   "types": "./dist/index.d.ts",
+  "engines": {
+    "node": ">=20"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js",
-      "require": "./dist/index.cjs"
+      "browser": {
+        "import": "./dist/edge.js"
+      },
+      "worker": {
+        "import": "./dist/edge.js"
+      },
+      "node": {
+        "import": "./dist/index.js",
+        "require": "./dist/index.cjs"
+      },
+      "default": {
+        "import": "./dist/edge.js"
+      }
+    },
+    "./edge": {
+      "types": "./dist/edge.d.ts",
+      "import": "./dist/edge.js"
     },
     "./document": {
       "types": "./dist/document.d.ts",
-      "import": "./dist/document.js",
-      "require": "./dist/document.cjs"
+      "browser": {
+        "import": "./dist/document-edge.js"
+      },
+      "worker": {
+        "import": "./dist/document-edge.js"
+      },
+      "node": {
+        "import": "./dist/document.js",
+        "require": "./dist/document.cjs"
+      },
+      "default": {
+        "import": "./dist/document-edge.js"
+      }
+    },
+    "./document/edge": {
+      "types": "./dist/document-edge.d.ts",
+      "import": "./dist/document-edge.js"
     },
     "./package.json": "./package.json"
   },
@@ -27,7 +61,7 @@
   ],
   "sideEffects": false,
   "scripts": {
-    "build": "tsup src/index.ts src/document.ts --format esm,cjs --dts --sourcemap --clean",
+    "build": "tsup",
     "lint": "eslint . --max-warnings=0",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
@@ -36,13 +70,13 @@
   },
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.1075.0",
-    "@aws-sdk/lib-dynamodb": "^3.1075.0",
     "@smithy/fetch-http-handler": "^5.5.2",
     "@smithy/node-http-handler": "^4.8.2",
     "@smithy/protocol-http": "^5.5.2",
     "@smithy/types": "^4.15.0"
   },
   "devDependencies": {
+    "@aws-sdk/lib-dynamodb": "^3.1075.0",
     "@eslint/js": "^10.0.1",
     "@types/node": "^24.0.0",
     "eslint": "^10.5.0",

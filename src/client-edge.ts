@@ -1,10 +1,10 @@
 import { AlternatorDynamoDBClientBase } from "./client-base.js";
-import { nodeRuntimePlatform } from "./runtime-node.js";
+import { edgeRuntimePlatform } from "./runtime-edge.js";
 import type { AlternatorDynamoDBClientConfig } from "./types.js";
 
 export class AlternatorDynamoDBClient extends AlternatorDynamoDBClientBase {
   constructor(config: AlternatorDynamoDBClientConfig) {
-    super(config, nodeRuntimePlatform);
+    super(config, edgeRuntimePlatform);
   }
 }
 
