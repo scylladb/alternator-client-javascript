@@ -143,8 +143,10 @@ describeIntegration.each(integrationEndpoints())(
     it("compresses large requests and leaves small requests uncompressed by threshold", async () => {
       const client = buildClient(endpoint, {
         compression: {
-          enabled: true,
-          thresholdBytes: 100,
+          request: {
+            enabled: true,
+            thresholdBytes: 100,
+          },
         },
         maxAttempts: 1,
       });
@@ -178,9 +180,11 @@ describeIntegration.each(integrationEndpoints())(
     ])("reads %s-compressed responses", async (encoding) => {
       const tableName = uniqueTableName(`js_response_compression_${encoding}`);
       const client = buildClient(endpoint, {
-        responseCompression: {
-          enabled: true,
-          encodings: [encoding],
+        compression: {
+          response: {
+            enabled: true,
+            algorithms: [encoding],
+          },
         },
         maxAttempts: 1,
       });
@@ -297,8 +301,10 @@ describeIntegration.each(integrationEndpoints())(
     it("keeps compression headers when header optimization and compression are combined", async () => {
       const client = buildClient(endpoint, {
         compression: {
-          enabled: true,
-          thresholdBytes: 100,
+          request: {
+            enabled: true,
+            thresholdBytes: 100,
+          },
         },
         headerOptimization: {
           enabled: true,

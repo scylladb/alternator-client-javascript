@@ -31,10 +31,11 @@ export function assertRuntimeSupport(config: NormalizedAlternatorConfig): void {
     throw new Error("Alternator edge runtime does not support Node HTTP handler options");
   }
 
-  if (config.compression.enabled && !config.compression.compressor && typeof CompressionStream === "undefined") {
+  const requestCompression = config.compression.request;
+  if (requestCompression.enabled && !requestCompression.compressor && typeof CompressionStream === "undefined") {
     throw new Error("Alternator edge runtime gzip compression requires CompressionStream support");
   }
-  if (config.responseCompression.enabled && typeof DecompressionStream === "undefined") {
+  if (config.compression.response.enabled && typeof DecompressionStream === "undefined") {
     throw new Error("Alternator edge runtime response compression requires DecompressionStream support");
   }
 }
@@ -153,11 +154,11 @@ function withResponseCompression(
   requestHandler: HttpHandlerUserInput,
   config: NormalizedAlternatorConfig,
 ): HttpHandlerUserInput {
-  if (!config.responseCompression.enabled) {
+  if (!config.compression.response.enabled) {
     return requestHandler;
   }
   if (!isHttpHandler(requestHandler)) {
-    throw new TypeError("responseCompression requires requestHandler to be an HTTP handler instance");
+    throw new TypeError("compression.response requires requestHandler to be an HTTP handler instance");
   }
   return new ResponseCompressionHttpHandler(requestHandler, config.runtime);
 }

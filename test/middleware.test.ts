@@ -189,7 +189,7 @@ describe("Alternator middleware", () => {
       seeds: ["seed"],
       requestHandler: handler,
       discovery: { background: false },
-      compression: true,
+      compression: { request: true },
     });
 
     await client.send(
@@ -230,9 +230,11 @@ describe("Alternator middleware", () => {
       seeds: ["seed"],
       requestHandler: handler,
       discovery: { background: false },
-      responseCompression: {
-        enabled: true,
-        encodings: [encoding],
+      compression: {
+        response: {
+          enabled: true,
+          algorithms: [encoding],
+        },
       },
     });
 
@@ -248,9 +250,11 @@ describe("Alternator middleware", () => {
       seeds: ["seed"],
       requestHandler: handler,
       discovery: { background: false },
-      responseCompression: {
-        enabled: true,
-        encodings: [ResponseCompressionGzip],
+      compression: {
+        response: {
+          enabled: true,
+          algorithms: [ResponseCompressionGzip],
+        },
       },
     });
 
@@ -283,9 +287,11 @@ describe("Alternator middleware", () => {
         accessKeyId: "key",
         secretAccessKey: "secret",
       },
-      responseCompression: {
-        enabled: true,
-        encodings: [ResponseCompressionGzip],
+      compression: {
+        response: {
+          enabled: true,
+          algorithms: [ResponseCompressionGzip],
+        },
       },
     });
 

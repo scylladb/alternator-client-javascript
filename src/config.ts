@@ -4,12 +4,17 @@ import { normalizeUserAgent } from "./user-agent.js";
 import type { RoutingRule } from "./routing.js";
 import { ResponseCompressionDeflate, ResponseCompressionGzip } from "./types.js";
 import type {
+  AlternatorCompressionOptions,
   AlternatorConnectionOptions,
   AlternatorDynamoDBClientConfig,
   AlternatorKeyRouteAffinityType,
-  AlternatorResponseCompression,
+  AlternatorRequestCompressionConfig,
+  AlternatorResponseCompressionAlgorithm,
+  AlternatorResponseCompressionConfig,
   AlternatorRuntime,
   NormalizedAlternatorConfig,
+  NormalizedCompressionOptions,
+  NormalizedRequestCompressionOptions,
   NormalizedResponseCompressionOptions,
 } from "./types.js";
 
@@ -20,9 +25,8 @@ const DEFAULT_ALLOWED_HEADERS = [
   "Accept-Encoding",
   "Content-Encoding",
 ] as const;
-const DEFAULT_RESPONSE_COMPRESSION_ENCODINGS = [
+const DEFAULT_RESPONSE_COMPRESSION_ALGORITHMS = [
   ResponseCompressionGzip,
-  ResponseCompressionDeflate,
 ] as const;
 
 export const DEFAULT_REGION = "us-east-1";
@@ -55,7 +59,6 @@ export function normalizeConfig(input: AlternatorDynamoDBClientConfig): Normaliz
   const noAuth = input.credentials === undefined;
   const routingRule = normalizeRouting(input.routing);
   const compression = normalizeCompression(input.compression);
-  const responseCompression = normalizeResponseCompression(input.responseCompression);
   const headerOptimization = normalizeHeaderOptimization(input.headerOptimization, noAuth);
   const userAgent = normalizeUserAgent(input.userAgent);
   const keyRouteAffinity = normalizeKeyRouteAffinity(input.keyRouteAffinity);
@@ -69,7 +72,6 @@ export function normalizeConfig(input: AlternatorDynamoDBClientConfig): Normaliz
     routing: routingRule,
     runtime,
     compression,
-    responseCompression,
     headerOptimization,
     userAgent,
     keyRouteAffinity,
@@ -207,69 +209,97 @@ function normalizeRuntime(runtime: AlternatorDynamoDBClientConfig["runtime"]): A
   return normalized;
 }
 
-function normalizeCompression(input: AlternatorDynamoDBClientConfig["compression"]) {
+function normalizeCompression(input: AlternatorDynamoDBClientConfig["compression"]): NormalizedCompressionOptions {
+  if (input === undefined) {
+    return {
+      request: normalizeRequestCompression(undefined),
+      response: normalizeResponseCompression(undefined),
+    };
+  }
+  if (!isRecord(input)) {
+    throw new TypeError("compression must be an object with request and/or response options");
+  }
+  assertAllowedKeys(input, ["request", "response"], "compression");
+  const compression = input as AlternatorCompressionOptions;
+  return {
+    request: normalizeRequestCompression(compression.request),
+    response: normalizeResponseCompression(compression.response),
+  };
+}
+
+function normalizeRequestCompression(
+  input: AlternatorRequestCompressionConfig | undefined,
+): NormalizedRequestCompressionOptions {
   if (typeof input === "boolean") {
     return { enabled: input, thresholdBytes: 0 };
   }
-  const normalized = {
-    enabled: input?.enabled ?? false,
-    thresholdBytes: input?.thresholdBytes ?? 0,
-    ...(input?.gzipLevel !== undefined ? { gzipLevel: input.gzipLevel } : {}),
-    ...(input?.compressor ? { compressor: input.compressor } : {}),
-  };
-  if (normalized.gzipLevel !== undefined && (normalized.gzipLevel < -1 || normalized.gzipLevel > 9)) {
-    throw new TypeError("compression.gzipLevel must be between -1 and 9");
+  if (input === undefined) {
+    return { enabled: false, thresholdBytes: 0 };
   }
-  return normalized;
+  if (!isRecord(input)) {
+    throw new TypeError("compression.request must be a boolean or request compression object");
+  }
+  const options = input as Exclude<AlternatorRequestCompressionConfig, boolean>;
+  const gzipLevel = options.gzipLevel;
+  if (gzipLevel !== undefined && (gzipLevel < -1 || gzipLevel > 9)) {
+    throw new TypeError("compression.request.gzipLevel must be between -1 and 9");
+  }
+  return {
+    enabled: options.enabled ?? false,
+    thresholdBytes: options.thresholdBytes ?? 0,
+    ...(gzipLevel !== undefined ? { gzipLevel } : {}),
+    ...(options.compressor ? { compressor: options.compressor } : {}),
+  };
 }
 
 function normalizeResponseCompression(
-  input: AlternatorDynamoDBClientConfig["responseCompression"],
+  input: AlternatorResponseCompressionConfig | undefined,
 ): NormalizedResponseCompressionOptions {
   if (input === undefined || input === false) {
-    return { enabled: false, encodings: [] };
+    return { enabled: false, algorithms: [] };
   }
 
-  const encodings = responseCompressionEncodings(input)
-    .map(normalizeResponseCompressionEncoding)
-    .filter((encoding, index, values) => values.indexOf(encoding) === index);
+  const algorithms = configuredResponseAlgorithms(input)
+    .map(normalizeResponseCompressionAlgorithm)
+    .filter((algorithm, index, values) => values.indexOf(algorithm) === index);
 
   return {
-    enabled: encodings.length > 0,
-    encodings,
+    enabled: algorithms.length > 0,
+    algorithms,
   };
 }
 
-function responseCompressionEncodings(
-  input: NonNullable<AlternatorDynamoDBClientConfig["responseCompression"]>,
+function configuredResponseAlgorithms(
+  input: NonNullable<AlternatorResponseCompressionConfig>,
 ): readonly unknown[] {
   if (input === true) {
-    return DEFAULT_RESPONSE_COMPRESSION_ENCODINGS;
+    return DEFAULT_RESPONSE_COMPRESSION_ALGORITHMS;
   }
   if (!isRecord(input)) {
-    throw new TypeError("responseCompression must be a boolean or options object");
+    throw new TypeError("compression.response must be a boolean or options object");
   }
+  assertAllowedKeys(input, ["enabled", "algorithms"], "compression.response");
   if (input.enabled === false) {
     return [];
   }
-  if (input.encodings !== undefined) {
-    if (!Array.isArray(input.encodings)) {
-      throw new TypeError("responseCompression.encodings must be an array");
+  if (input.algorithms !== undefined) {
+    if (!Array.isArray(input.algorithms)) {
+      throw new TypeError("compression.response.algorithms must be an array");
     }
   }
   if (input.enabled !== true) {
     return [];
   }
-  return input.encodings ?? DEFAULT_RESPONSE_COMPRESSION_ENCODINGS;
+  return input.algorithms ?? DEFAULT_RESPONSE_COMPRESSION_ALGORITHMS;
 }
 
-function normalizeResponseCompressionEncoding(encoding: unknown): AlternatorResponseCompression {
-  switch (encoding) {
+function normalizeResponseCompressionAlgorithm(algorithm: unknown): AlternatorResponseCompressionAlgorithm {
+  switch (algorithm) {
     case ResponseCompressionGzip:
     case ResponseCompressionDeflate:
-      return encoding;
+      return algorithm;
     default:
-      throw new TypeError('responseCompression encodings must be "gzip" or "deflate"');
+      throw new TypeError('compression.response algorithms must be "gzip" or "deflate"');
   }
 }
 
@@ -386,6 +416,15 @@ function assertNonNegative(value: number, label: string): void {
 function assertNonEmptyString(value: unknown, label: string): asserts value is string {
   if (typeof value !== "string" || value.trim() === "") {
     throw new TypeError(`${label} must be a non-empty string`);
+  }
+}
+
+function assertAllowedKeys(value: Record<string, unknown>, keys: readonly string[], label: string): void {
+  const allowed = new Set(keys);
+  for (const key of Object.keys(value)) {
+    if (!allowed.has(key)) {
+      throw new TypeError(`${label}.${key} is not a supported option`);
+    }
   }
 }
 

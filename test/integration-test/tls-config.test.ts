@@ -93,8 +93,10 @@ describeIntegration.each(httpsIntegrationEndpoints())(
           rejectUnauthorized: false,
         },
         compression: {
-          enabled: true,
-          thresholdBytes: 100,
+          request: {
+            enabled: true,
+            thresholdBytes: 100,
+          },
         },
         headerOptimization: {
           enabled: true,
