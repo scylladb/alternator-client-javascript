@@ -1,6 +1,6 @@
 {
   "name": "@scylladb/alternator-client",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "AWS SDK v3-compatible DynamoDB client with ScyllaDB Alternator cluster discovery and routing.",
   "license": "Apache-2.0",
   "type": "module",
