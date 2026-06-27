@@ -14,8 +14,17 @@ import { createAlternatorPostSigningMiddleware, createAlternatorRequestMiddlewar
 import { assertRuntimeSupport, createRequestHandler } from "./runtime.js";
 import type { AlternatorDynamoDBClientConfig, AlternatorNode, NormalizedAlternatorConfig } from "./types.js";
 
+export interface AlternatorDynamoDBClientApi {
+  nodes(): AlternatorNode[];
+  refreshNodes(): Promise<AlternatorNode[]>;
+  supportsScopedDiscovery(): Promise<boolean>;
+  validateRouting(): Promise<void>;
+  partitionKey(tableName: string): string | undefined;
+}
+
 export class AlternatorDynamoDBClient extends DynamoDBClient {
-  readonly alternatorConfig: NormalizedAlternatorConfig;
+  readonly alternator: AlternatorDynamoDBClientApi;
+  private readonly alternatorConfig: NormalizedAlternatorConfig;
   private readonly discovery: AlternatorDiscovery;
   private readonly keyAffinity: KeyRouteAffinityPlanner;
 
@@ -38,6 +47,13 @@ export class AlternatorDynamoDBClient extends DynamoDBClient {
       (tableName) => this.discoverPartitionKey(tableName),
       alternatorConfig.logger,
     );
+    this.alternator = {
+      nodes: () => this.discovery.getLiveNodes(),
+      refreshNodes: () => this.discovery.refreshLiveNodes(),
+      supportsScopedDiscovery: () => this.discovery.checkRackDatacenterSupport(),
+      validateRouting: () => this.discovery.checkIfRackAndDatacenterSetCorrectly(),
+      partitionKey: (tableName) => this.keyAffinity.getPartitionKeyName(tableName),
+    };
 
     this.middlewareStack.addRelativeTo(
       createAlternatorRequestMiddleware<ServiceInputTypes, ServiceOutputTypes>({
@@ -63,30 +79,6 @@ export class AlternatorDynamoDBClient extends DynamoDBClient {
       },
     );
 
-  }
-
-  getLiveNodes(): AlternatorNode[] {
-    return this.discovery.getLiveNodes();
-  }
-
-  refreshLiveNodes(): Promise<AlternatorNode[]> {
-    return this.discovery.refreshLiveNodes();
-  }
-
-  checkRackDatacenterSupport(): Promise<boolean> {
-    return this.discovery.checkRackDatacenterSupport();
-  }
-
-  checkIfRackAndDatacenterSetCorrectly(): Promise<void> {
-    return this.discovery.checkIfRackAndDatacenterSetCorrectly();
-  }
-
-  validateRackDatacenterConfig(): Promise<void> {
-    return this.checkIfRackAndDatacenterSetCorrectly();
-  }
-
-  getPartitionKeyName(tableName: string): string | undefined {
-    return this.keyAffinity.getPartitionKeyName(tableName);
   }
 
   override destroy(): void {
@@ -125,11 +117,12 @@ function buildDynamoConfig(
     tls: _tls,
     discovery: _discovery,
     connection: _connection,
-    endpoint: _endpoint,
+    logger: _logger,
     credentials,
     region,
-    ...awsConfig
-  } = input;
+    ...awsConfigWithEndpoint
+  } = input as AlternatorDynamoDBClientConfig & { endpoint?: unknown };
+  const { endpoint: _endpoint, ...awsConfig } = awsConfigWithEndpoint;
 
   const dynamoConfig: DynamoDBClientConfig & { applyChecksum?: boolean } = {
     ...awsConfig,

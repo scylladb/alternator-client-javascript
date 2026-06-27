@@ -1,7 +1,7 @@
 import { AlternatorQueryPlan, firstNodeWithSeed } from "./query-plan.js";
 import { murmur3H1 } from "./murmur.js";
 import type {
-  AlternatorKeyRouteAffinityType,
+  AlternatorKeyRouteAffinityMode,
   AlternatorLogger,
   AlternatorNode,
   NormalizedKeyRouteAffinityOptions,
@@ -48,11 +48,11 @@ export class KeyRouteAffinityPlanner {
       return undefined;
     }
 
-    if (isBatchWriteCommand(commandName) && isBatchWriteInput(input) && this.config.type === "any-write") {
+    if (isBatchWriteCommand(commandName) && isBatchWriteInput(input) && this.config.mode === "any-write") {
       return this.batchWriteQueryPlan(input.RequestItems, nodes);
     }
 
-    const hash = this.partitionKeyHashForInput(input, this.config.type, commandName);
+    const hash = this.partitionKeyHashForInput(input, this.config.mode, commandName);
     if (hash === undefined) {
       return undefined;
     }
@@ -61,10 +61,10 @@ export class KeyRouteAffinityPlanner {
 
   private partitionKeyHashForInput(
     input: DynamoDBInput,
-    affinityType: AlternatorKeyRouteAffinityType,
+    affinityMode: AlternatorKeyRouteAffinityMode,
     commandName?: string,
   ): bigint | undefined {
-    const request = writeRequestForInput(input, affinityType, commandName);
+    const request = writeRequestForInput(input, affinityMode, commandName);
     if (!request) {
       return undefined;
     }
@@ -171,7 +171,7 @@ function hashWithPrefix(prefix: number, bytes: Uint8Array): bigint {
 
 function writeRequestForInput(
   input: DynamoDBInput,
-  affinityType: AlternatorKeyRouteAffinityType,
+  affinityMode: AlternatorKeyRouteAffinityMode,
   commandName?: string,
 ): { tableName: string; values: AttributeValueRecord } | undefined {
   const tableName = typeof input.TableName === "string" ? input.TableName : undefined;
@@ -179,40 +179,34 @@ function writeRequestForInput(
     return undefined;
   }
 
-  if (isPutCommand(commandName) && isRecord(input.Item) && shouldRoutePut(input, affinityType)) {
+  if (isPutCommand(commandName) && isRecord(input.Item) && shouldRoutePut(input, affinityMode)) {
     return { tableName, values: input.Item };
   }
-  if (isUpdateCommand(commandName) && isRecord(input.Key) && shouldRouteUpdate(input, affinityType)) {
+  if (isUpdateCommand(commandName) && isRecord(input.Key) && shouldRouteUpdate(input, affinityMode)) {
     return { tableName, values: input.Key };
   }
-  if (isDeleteCommand(commandName) && isRecord(input.Key) && shouldRouteDelete(input, affinityType)) {
+  if (isDeleteCommand(commandName) && isRecord(input.Key) && shouldRouteDelete(input, affinityMode)) {
     return { tableName, values: input.Key };
   }
 
   return undefined;
 }
 
-function shouldRoutePut(input: DynamoDBInput, affinityType: AlternatorKeyRouteAffinityType): boolean {
+function shouldRoutePut(input: DynamoDBInput, affinityMode: AlternatorKeyRouteAffinityMode): boolean {
   if (!("Item" in input)) {
     return false;
   }
-  if (affinityType === "none") {
-    return false;
-  }
-  if (affinityType === "any-write") {
+  if (affinityMode === "any-write") {
     return true;
   }
   return hasExpected(input) || nonEmptyString(input.ConditionExpression) || input.ReturnValues === "ALL_OLD";
 }
 
-function shouldRouteUpdate(input: DynamoDBInput, affinityType: AlternatorKeyRouteAffinityType): boolean {
+function shouldRouteUpdate(input: DynamoDBInput, affinityMode: AlternatorKeyRouteAffinityMode): boolean {
   if (!("Key" in input) || !("UpdateExpression" in input || "AttributeUpdates" in input)) {
     return false;
   }
-  if (affinityType === "none") {
-    return false;
-  }
-  if (affinityType === "any-write") {
+  if (affinityMode === "any-write") {
     return true;
   }
 
@@ -241,14 +235,11 @@ function shouldRouteUpdate(input: DynamoDBInput, affinityType: AlternatorKeyRout
   return false;
 }
 
-function shouldRouteDelete(input: DynamoDBInput, affinityType: AlternatorKeyRouteAffinityType): boolean {
+function shouldRouteDelete(input: DynamoDBInput, affinityMode: AlternatorKeyRouteAffinityMode): boolean {
   if (!("Key" in input) || "UpdateExpression" in input || "AttributeUpdates" in input) {
     return false;
   }
-  if (affinityType === "none") {
-    return false;
-  }
-  if (affinityType === "any-write") {
+  if (affinityMode === "any-write") {
     return true;
   }
   return hasExpected(input) || nonEmptyString(input.ConditionExpression) || input.ReturnValues === "ALL_OLD";

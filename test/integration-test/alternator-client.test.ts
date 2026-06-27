@@ -1,10 +1,6 @@
 import { GetItemCommand, ListTablesCommand, PutItemCommand } from "@aws-sdk/client-dynamodb";
 import { describe, expect, it } from "vitest";
-import {
-  ResponseCompressionDeflate,
-  ResponseCompressionGzip,
-  routing,
-} from "../../src/index.js";
+import { routing } from "../../src/index.js";
 import { describeIntegration, integrationConfig, integrationEndpoints } from "./config.js";
 import {
   buildClient,
@@ -25,22 +21,26 @@ describeIntegration.each(integrationEndpoints())(
         routing: routing.cluster(),
       });
       const datacenter = buildClient(endpoint, {
-        routing: routing.datacenter(integrationConfig.datacenter, {
+        routing: routing.datacenter({
+          datacenter: integrationConfig.datacenter,
           fallback: routing.cluster(),
         }),
       });
       const rack = buildClient(endpoint, {
-        routing: routing.rack(integrationConfig.datacenter, integrationConfig.rack, {
-          fallback: routing.datacenter(integrationConfig.datacenter, {
+        routing: routing.rack({
+          datacenter: integrationConfig.datacenter,
+          rack: integrationConfig.rack,
+          fallback: routing.datacenter({
+            datacenter: integrationConfig.datacenter,
             fallback: routing.cluster(),
           }),
         }),
       });
 
       try {
-        await expect(cluster.refreshLiveNodes()).resolves.not.toHaveLength(0);
-        await expect(datacenter.refreshLiveNodes()).resolves.not.toHaveLength(0);
-        await expect(rack.refreshLiveNodes()).resolves.not.toHaveLength(0);
+        await expect(cluster.alternator.refreshNodes()).resolves.not.toHaveLength(0);
+        await expect(datacenter.alternator.refreshNodes()).resolves.not.toHaveLength(0);
+        await expect(rack.alternator.refreshNodes()).resolves.not.toHaveLength(0);
       } finally {
         cluster.destroy();
         datacenter.destroy();
@@ -50,24 +50,28 @@ describeIntegration.each(integrationEndpoints())(
 
     it("falls back from a wrong datacenter or rack to a wider routing scope", async () => {
       const wrongDatacenter = buildClient(endpoint, {
-        routing: routing.datacenter("__wrong_dc__", {
+        routing: routing.datacenter({
+          datacenter: "__wrong_dc__",
           fallback: routing.cluster(),
         }),
       });
       const wrongRack = buildClient(endpoint, {
-        routing: routing.rack(integrationConfig.datacenter, "__wrong_rack__", {
-          fallback: routing.datacenter(integrationConfig.datacenter, {
+        routing: routing.rack({
+          datacenter: integrationConfig.datacenter,
+          rack: "__wrong_rack__",
+          fallback: routing.datacenter({
+            datacenter: integrationConfig.datacenter,
             fallback: routing.cluster(),
           }),
         }),
       });
 
       try {
-        await expect(wrongDatacenter.refreshLiveNodes()).resolves.not.toHaveLength(0);
-        await expect(wrongDatacenter.validateRackDatacenterConfig()).resolves.toBeUndefined();
+        await expect(wrongDatacenter.alternator.refreshNodes()).resolves.not.toHaveLength(0);
+        await expect(wrongDatacenter.alternator.validateRouting()).resolves.toBeUndefined();
 
-        await expect(wrongRack.refreshLiveNodes()).resolves.not.toHaveLength(0);
-        await expect(wrongRack.validateRackDatacenterConfig()).resolves.toBeUndefined();
+        await expect(wrongRack.alternator.refreshNodes()).resolves.not.toHaveLength(0);
+        await expect(wrongRack.alternator.validateRouting()).resolves.toBeUndefined();
       } finally {
         wrongDatacenter.destroy();
         wrongRack.destroy();
@@ -76,18 +80,19 @@ describeIntegration.each(integrationEndpoints())(
 
     it("checks rack/datacenter query support and exposes live-node APIs", async () => {
       const client = buildClient(endpoint, {
-        routing: routing.datacenter(integrationConfig.datacenter, {
+        routing: routing.datacenter({
+          datacenter: integrationConfig.datacenter,
           fallback: routing.cluster(),
         }),
       });
 
       try {
-        await expect(client.checkRackDatacenterSupport()).resolves.toBe(true);
-        await expect(client.checkIfRackAndDatacenterSetCorrectly()).resolves.toBeUndefined();
+        await expect(client.alternator.supportsScopedDiscovery()).resolves.toBe(true);
+        await expect(client.alternator.validateRouting()).resolves.toBeUndefined();
 
-        const nodes = await client.refreshLiveNodes();
+        const nodes = await client.alternator.refreshNodes();
         expect(nodes.length).toBeGreaterThan(0);
-        expect(client.getLiveNodes()).toEqual(nodes);
+        expect(client.alternator.nodes()).toEqual(nodes);
       } finally {
         client.destroy();
       }
@@ -95,14 +100,15 @@ describeIntegration.each(integrationEndpoints())(
 
     it("routes repeated commands through discovered nodes", async () => {
       const client = buildClient(endpoint, {
-        routing: routing.datacenter(integrationConfig.datacenter, {
+        routing: routing.datacenter({
+          datacenter: integrationConfig.datacenter,
           fallback: routing.cluster(),
         }),
       });
       const captured = captureCommandRequests(client);
 
       try {
-        const nodes = await client.refreshLiveNodes();
+        const nodes = await client.alternator.refreshNodes();
         expect(nodes.length).toBeGreaterThan(0);
 
         for (let index = 0; index < nodes.length * 2; index += 1) {
@@ -120,14 +126,15 @@ describeIntegration.each(integrationEndpoints())(
 
     it("sends commands through discovered nodes", async () => {
       const client = buildClient(endpoint, {
-        routing: routing.datacenter(integrationConfig.datacenter, {
+        routing: routing.datacenter({
+          datacenter: integrationConfig.datacenter,
           fallback: routing.cluster(),
         }),
       });
       const captured = captureCommandRequests(client);
 
       try {
-        const nodes = await client.refreshLiveNodes();
+        const nodes = await client.alternator.refreshNodes();
         await client.send(new ListTablesCommand({ Limit: 1 }));
         await client.send(new ListTablesCommand({ Limit: 1 }));
 
@@ -144,7 +151,6 @@ describeIntegration.each(integrationEndpoints())(
       const client = buildClient(endpoint, {
         compression: {
           request: {
-            enabled: true,
             thresholdBytes: 100,
           },
         },
@@ -175,14 +181,13 @@ describeIntegration.each(integrationEndpoints())(
     });
 
     it.each([
-      [ResponseCompressionGzip],
-      [ResponseCompressionDeflate],
-    ])("reads %s-compressed responses", async (encoding) => {
+      ["gzip"],
+      ["deflate"],
+    ] as const)("reads %s-compressed responses", async (encoding) => {
       const tableName = uniqueTableName(`js_response_compression_${encoding}`);
       const client = buildClient(endpoint, {
         compression: {
           response: {
-            enabled: true,
             algorithms: [encoding],
           },
         },
@@ -218,7 +223,6 @@ describeIntegration.each(integrationEndpoints())(
     it("filters wire headers using the configured whitelist", async () => {
       const client = buildClient(endpoint, {
         headerOptimization: {
-          enabled: true,
           allowedHeaders: ["Host", "X-Amz-Target", "Authorization", "X-Amz-Date"],
         },
       });
@@ -266,7 +270,6 @@ describeIntegration.each(integrationEndpoints())(
     it("keeps custom-whitelisted headers when header optimization is enabled", async () => {
       const client = buildClient(endpoint, {
         headerOptimization: {
-          enabled: true,
           allowedHeaders: [
             "Host",
             "X-Amz-Target",
@@ -302,12 +305,10 @@ describeIntegration.each(integrationEndpoints())(
       const client = buildClient(endpoint, {
         compression: {
           request: {
-            enabled: true,
             thresholdBytes: 100,
           },
         },
         headerOptimization: {
-          enabled: true,
           allowedHeaders: [
             "Host",
             "X-Amz-Target",

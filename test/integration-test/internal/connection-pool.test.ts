@@ -16,10 +16,10 @@ describeIntegration.each(integrationEndpoints())(
 
       try {
         for (let index = 0; index < 30; index += 1) {
-          await client.refreshLiveNodes();
+          await client.alternator.refreshNodes();
         }
 
-        expect(client.getLiveNodes().length).toBeGreaterThan(0);
+        expect(client.alternator.nodes().length).toBeGreaterThan(0);
       } finally {
         client.destroy();
       }
@@ -35,7 +35,7 @@ describeIntegration.each(integrationEndpoints())(
       });
 
       try {
-        await client.refreshLiveNodes();
+        await client.alternator.refreshNodes();
         for (let index = 0; index < 10; index += 1) {
           await client.send(new ListTablesCommand({ Limit: 1 }));
           await sleep(250);

@@ -28,7 +28,7 @@ describeIntegration.each(httpsIntegrationEndpoints())(
       });
 
       try {
-        await expect(client.refreshLiveNodes()).resolves.not.toHaveLength(0);
+        await expect(client.alternator.refreshNodes()).resolves.not.toHaveLength(0);
         await expect(client.send(new ListTablesCommand({ Limit: 1 }))).resolves.toBeDefined();
       } finally {
         client.destroy();
@@ -43,13 +43,13 @@ describeIntegration.each(httpsIntegrationEndpoints())(
 
       const client = buildClient(endpoint, {
         tls: {
-          caFile: caCertPath,
+          ca: { file: caCertPath },
           rejectUnauthorized: true,
         },
       });
 
       try {
-        await expect(client.refreshLiveNodes()).resolves.not.toHaveLength(0);
+        await expect(client.alternator.refreshNodes()).resolves.not.toHaveLength(0);
         await expect(client.send(new ListTablesCommand({ Limit: 1 }))).resolves.toBeDefined();
       } finally {
         client.destroy();
@@ -65,7 +65,7 @@ describeIntegration.each(httpsIntegrationEndpoints())(
       const tableName = uniqueTableName("js_tls_ca_crud_it");
       const client = buildClient(endpoint, {
         tls: {
-          caFile: caCertPath,
+          ca: { file: caCertPath },
           rejectUnauthorized: true,
         },
       });
@@ -94,12 +94,10 @@ describeIntegration.each(httpsIntegrationEndpoints())(
         },
         compression: {
           request: {
-            enabled: true,
             thresholdBytes: 100,
           },
         },
         headerOptimization: {
-          enabled: true,
           allowedHeaders: [
             "Host",
             "X-Amz-Target",
@@ -114,7 +112,7 @@ describeIntegration.each(httpsIntegrationEndpoints())(
       const captured = captureCommandRequests(client);
 
       try {
-        await client.refreshLiveNodes();
+        await client.alternator.refreshNodes();
         await expect(
           client.send(
             new PutItemCommand({

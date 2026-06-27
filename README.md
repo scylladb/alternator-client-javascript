@@ -28,7 +28,8 @@ const client = new AlternatorDynamoDBClient({
   seeds: ["scylla-0.internal", "scylla-1.internal"],
   scheme: "http",
   port: 8080,
-  routing: routing.datacenter("dc1", {
+  routing: routing.datacenter({
+    datacenter: "dc1",
     fallback: routing.cluster(),
   }),
 
@@ -51,7 +52,7 @@ await client.send(
 client.destroy();
 ```
 
-`endpoint` is rejected. Use `seeds`, optional `scheme`, and a shared `port`.
+The public config does not include `endpoint`. Use `seeds`, optional `scheme`, and a shared `port`.
 Defaults are `scheme: "http"` and `port: 8080`. HTTPS users usually set
 `scheme: "https"` and `port: 8043`.
 
@@ -65,7 +66,7 @@ signing is preserved. `region` defaults to `us-east-1` for signing.
 import { PutCommand } from "@aws-sdk/lib-dynamodb";
 import { AlternatorDynamoDBDocumentClient } from "@scylladb/alternator-client/document";
 
-const docClient = new AlternatorDynamoDBDocumentClient(
+const docClient = AlternatorDynamoDBDocumentClient.fromConfig(
   { seeds: ["localhost"] },
   { marshallOptions: { removeUndefinedValues: true } },
 );
@@ -78,7 +79,7 @@ await docClient.send(
 );
 ```
 
-AWS-style wrapping is also supported:
+AWS-style wrapping is the primary API when you already have a low-level client:
 
 ```ts
 const base = new AlternatorDynamoDBClient({ seeds: ["localhost"] });
@@ -91,21 +92,25 @@ balancing unless the passed client is already an `AlternatorDynamoDBClient`.
 ## Alternator APIs
 
 ```ts
-client.getLiveNodes();
-await client.refreshLiveNodes();
-await client.checkRackDatacenterSupport();
-await client.checkIfRackAndDatacenterSetCorrectly();
-await client.validateRackDatacenterConfig();
-client.getPartitionKeyName("users");
+client.alternator.nodes();
+await client.alternator.refreshNodes();
+await client.alternator.supportsScopedDiscovery();
+await client.alternator.validateRouting();
+client.alternator.partitionKey("users");
 ```
 
 Routing helpers:
 
 ```ts
 routing.cluster();
-routing.datacenter("dc1", { fallback: routing.cluster() });
-routing.rack("dc1", "rack1", {
-  fallback: routing.datacenter("dc1", { fallback: routing.cluster() }),
+routing.datacenter({ datacenter: "dc1", fallback: routing.cluster() });
+routing.rack({
+  datacenter: "dc1",
+  rack: "rack1",
+  fallback: routing.datacenter({
+    datacenter: "dc1",
+    fallback: routing.cluster(),
+  }),
 });
 ```
 
@@ -152,25 +157,22 @@ new AlternatorDynamoDBClient({
 
   compression: {
     request: {
-      enabled: true,
       thresholdBytes: 1_024,
       gzipLevel: -1,
     },
     response: {
-      enabled: true,
-      algorithms: [ResponseCompressionGzip],
+      algorithms: ["gzip"],
     },
   },
 
   headerOptimization: {
-    enabled: true,
     allowedHeaders: ["Host", "X-Amz-Target", "Content-Length", "Accept-Encoding", "Content-Encoding"],
   },
 
-  userAgent: (userAgent) => `${userAgent} my-app/1.2.3`,
+  userAgent: { append: "my-app/1.2.3" },
 
   keyRouteAffinity: {
-    type: "any-write",
+    mode: "any-write",
     partitionKeys: {
       users: "id",
     },
@@ -178,7 +180,7 @@ new AlternatorDynamoDBClient({
   },
 
   tls: {
-    caFile: "/etc/ssl/scylla-ca.pem",
+    ca: { file: "/etc/ssl/scylla-ca.pem" },
     rejectUnauthorized: true,
     sessionCache: true,
   },
@@ -186,9 +188,11 @@ new AlternatorDynamoDBClient({
   connection: {
     keepAlive: true,
     maxSockets: 50,
-    connectionTimeoutMs: 1_000,
-    requestTimeoutMs: 0,
-    socketTimeoutMs: 0,
+    timeouts: {
+      connectMs: 1_000,
+      requestMs: 0,
+      socketMs: 0,
+    },
   },
 });
 ```
@@ -217,17 +221,16 @@ You can replace it completely:
 ```ts
 new AlternatorDynamoDBClient({
   seeds: ["scylla-0.internal"],
-  userAgent: "my-client/1.2.3",
+  userAgent: { value: "my-client/1.2.3" },
 });
 ```
 
-You can transform the generated value. The function receives the default
-ScyllaDB Alternator user-agent:
+You can append to the generated value:
 
 ```ts
 new AlternatorDynamoDBClient({
   seeds: ["scylla-0.internal"],
-  userAgent: (userAgent) => `${userAgent} my-app/4.5.6`,
+  userAgent: { append: "my-app/4.5.6" },
 });
 ```
 
@@ -239,37 +242,30 @@ separately:
 ```ts
 compression: {
   request: {
-    enabled: true,
     thresholdBytes: 1_024,
     gzipLevel: -1,
   },
   response: {
-    enabled: true,
-    algorithms: [ResponseCompressionGzip],
+    algorithms: ["gzip"],
   },
 }
 ```
 
-`compression.request: true` compresses every measurable request body with gzip.
+`compression.request: {}` compresses every measurable request body with gzip.
 Use `thresholdBytes` to skip smaller request bodies, `gzipLevel` to select the
-zlib level, or `compressor` for a custom request compressor.
+zlib level, or `compressor` for a custom request compressor. Use
+`compression.request: false` to disable request compression explicitly.
 
-`compression.response: true` enables the default response algorithm, `gzip`.
+`compression.response: {}` enables the default response algorithm, `gzip`.
 Pass an options object with an explicit algorithm list to control the
 `Accept-Encoding` value:
 
 ```ts
-import {
-  ResponseCompressionDeflate,
-  ResponseCompressionGzip,
-} from "@scylladb/alternator-client";
-
 new AlternatorDynamoDBClient({
   seeds: ["scylla-0.internal"],
   compression: {
     response: {
-      enabled: true,
-      algorithms: [ResponseCompressionGzip, ResponseCompressionDeflate],
+      algorithms: ["gzip", "deflate"],
     },
   },
 });
@@ -284,7 +280,7 @@ Key-route affinity supports these modes:
 
 ```ts
 keyRouteAffinity: {
-  type: "read-before-write", // or "any-write"
+  mode: "read-before-write", // or "any-write"
   partitionKeys: { users: "id" },
 }
 ```

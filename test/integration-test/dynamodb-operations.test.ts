@@ -105,7 +105,7 @@ describeIntegration.each(integrationEndpoints())(
       try {
         await safeDeleteTable(client, tableName);
         await createStringHashTable(client, tableName);
-        await client.refreshLiveNodes();
+        await client.alternator.refreshNodes();
 
         for (let index = 0; index < itemCount; index += 1) {
           await client.send(

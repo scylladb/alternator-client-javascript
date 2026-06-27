@@ -25,12 +25,12 @@ describe("key route affinity", () => {
       requestHandler: handler,
       discovery: { background: false },
       keyRouteAffinity: {
-        type: "read-before-write",
+        mode: "read-before-write",
         partitionKeys: { users: "id" },
       },
     });
 
-    await client.refreshLiveNodes();
+    await client.alternator.refreshNodes();
     await client.send(
       new PutItemCommand({
         TableName: "users",
@@ -62,12 +62,12 @@ describe("key route affinity", () => {
       requestHandler: handler,
       discovery: { background: false },
       keyRouteAffinity: {
-        type: "any-write",
+        mode: "any-write",
         partitionKeys: { users: "id" },
       },
     });
 
-    await client.refreshLiveNodes();
+    await client.alternator.refreshNodes();
     await client.send(
       new BatchWriteItemCommand({
         RequestItems: {
