@@ -128,6 +128,7 @@ least one seed per datacenter.
 | Socket pool tuning | Yes | No |
 | TLS session cache tuning | Yes | No |
 | Gzip request compression | Yes | Only with `CompressionStream` |
+| Gzip/deflate response compression | Yes | Only with `DecompressionStream` |
 
 Unsupported edge combinations throw at construction time with clear errors.
 
@@ -152,6 +153,11 @@ new AlternatorDynamoDBClient({
   compression: {
     enabled: true,
     gzipLevel: -1,
+  },
+
+  responseCompression: {
+    enabled: true,
+    encodings: [ResponseCompressionGzip],
   },
 
   headerOptimization: {
@@ -228,6 +234,28 @@ Use `userAgent: false` to remove the header entirely.
 Request compression is disabled by default. When enabled, it compresses every
 request body with gzip. Use `gzipLevel` to select the zlib level, or provide
 `compressor` for a custom compressor.
+
+Response compression is disabled by default. Enable it with
+`responseCompression: true` to accept both supported encodings, or pass an
+options object with an explicit list:
+
+```ts
+import {
+  ResponseCompressionDeflate,
+  ResponseCompressionGzip,
+} from "@scylladb/alternator-client";
+
+new AlternatorDynamoDBClient({
+  seeds: ["scylla-0.internal"],
+  responseCompression: {
+    enabled: true,
+    encodings: [ResponseCompressionGzip, ResponseCompressionDeflate],
+  },
+});
+```
+
+When enabled, the client sends `Accept-Encoding` and transparently decodes
+`gzip` and `deflate` response bodies before the AWS SDK deserializes them.
 
 Key-route affinity supports these modes:
 

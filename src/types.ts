@@ -28,6 +28,20 @@ export interface AlternatorCompressionOptions {
   compressor?: AlternatorRequestCompressor;
 }
 
+export const ResponseCompressionGzip = "gzip" as const;
+export const ResponseCompressionDeflate = "deflate" as const;
+
+export type AlternatorResponseCompression =
+  | typeof ResponseCompressionGzip
+  | typeof ResponseCompressionDeflate;
+
+export type ResponseCompression = AlternatorResponseCompression;
+
+export interface AlternatorResponseCompressionOptions {
+  enabled?: boolean;
+  encodings?: readonly AlternatorResponseCompression[];
+}
+
 export interface AlternatorRequestCompressorResult {
   readonly body: Uint8Array;
   readonly contentEncoding: string;
@@ -112,6 +126,7 @@ export interface AlternatorDynamoDBClientConfig extends BaseDynamoDBClientConfig
   runtime?: AlternatorRuntime;
   requestHandler?: DynamoDBClientConfig["requestHandler"];
   compression?: boolean | AlternatorCompressionOptions;
+  responseCompression?: boolean | AlternatorResponseCompressionOptions;
   headerOptimization?: boolean | AlternatorHeaderOptimizationOptions;
   userAgent?: AlternatorUserAgentConfig;
   keyRouteAffinity?: boolean | AlternatorKeyRouteAffinityOptions;
@@ -126,6 +141,11 @@ export interface NormalizedCompressionOptions {
   readonly thresholdBytes: number;
   readonly gzipLevel?: number;
   readonly compressor?: AlternatorRequestCompressor;
+}
+
+export interface NormalizedResponseCompressionOptions {
+  readonly enabled: boolean;
+  readonly encodings: readonly AlternatorResponseCompression[];
 }
 
 export interface NormalizedHeaderOptimizationOptions {
@@ -158,6 +178,7 @@ export interface NormalizedAlternatorConfig {
   readonly routing: RoutingRule;
   readonly runtime: AlternatorRuntime;
   readonly compression: NormalizedCompressionOptions;
+  readonly responseCompression: NormalizedResponseCompressionOptions;
   readonly headerOptimization: NormalizedHeaderOptimizationOptions;
   readonly userAgent: NormalizedUserAgentOptions;
   readonly keyRouteAffinity: NormalizedKeyRouteAffinityOptions;

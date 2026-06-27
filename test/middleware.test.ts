@@ -1,7 +1,19 @@
-import { ListTablesCommand, PutItemCommand } from "@aws-sdk/client-dynamodb";
-import { gunzipSync } from "node:zlib";
+import {
+  ListTablesCommand,
+  PutItemCommand,
+  type ServiceInputTypes,
+  type ServiceOutputTypes,
+} from "@aws-sdk/client-dynamodb";
+import { HttpRequest, HttpResponse } from "@smithy/protocol-http";
+import type { FinalizeRequestMiddleware } from "@smithy/types";
+import { Readable } from "node:stream";
+import { deflateSync, gunzipSync, gzipSync } from "node:zlib";
 import { describe, expect, it, vi } from "vitest";
-import { AlternatorDynamoDBClient } from "../src/index.js";
+import {
+  AlternatorDynamoDBClient,
+  ResponseCompressionDeflate,
+  ResponseCompressionGzip,
+} from "../src/index.js";
 import { alternatorUserAgentToken } from "../src/user-agent.js";
 import { commandRequests, jsonResponse, RecordingHandler } from "./helpers.js";
 
@@ -198,6 +210,92 @@ describe("Alternator middleware", () => {
     expect(json.TableName).toBe("users");
   });
 
+  it.each([
+    [ResponseCompressionGzip, gzipSync],
+    [ResponseCompressionDeflate, deflateSync],
+  ])("requests and decodes %s response compression", async (encoding, compress) => {
+    const handler = new RecordingHandler((request) => {
+      if (request.path === "/localnodes") {
+        return ["node-a"];
+      }
+      return compressedJsonResponse(
+        {
+          TableNames: ["compressed"],
+        },
+        encoding,
+        compress,
+      );
+    });
+    const client = new AlternatorDynamoDBClient({
+      seeds: ["seed"],
+      requestHandler: handler,
+      discovery: { background: false },
+      responseCompression: {
+        enabled: true,
+        encodings: [encoding],
+      },
+    });
+
+    const response = await client.send(new ListTablesCommand({}));
+
+    expect(response.TableNames).toEqual(["compressed"]);
+    expect(commandRequests(handler)[0]?.headers["accept-encoding"]).toBe(encoding);
+  });
+
+  it("replaces identity Accept-Encoding when response compression is enabled", async () => {
+    const handler = new RecordingHandler(() => ({ TableNames: [] }));
+    const client = new AlternatorDynamoDBClient({
+      seeds: ["seed"],
+      requestHandler: handler,
+      discovery: { background: false },
+      responseCompression: {
+        enabled: true,
+        encodings: [ResponseCompressionGzip],
+      },
+    });
+
+    const identityMiddleware: FinalizeRequestMiddleware<ServiceInputTypes, ServiceOutputTypes> =
+      (next) => (args) => {
+        if (HttpRequest.isInstance(args.request)) {
+          args.request.headers["accept-encoding"] = "identity";
+        }
+        return next(args);
+      };
+
+    client.middlewareStack.addRelativeTo(identityMiddleware, {
+      relation: "before",
+      toMiddleware: "alternatorPostSigningMiddleware",
+      name: "setIdentityAcceptEncoding",
+    });
+
+    await client.send(new ListTablesCommand({}));
+
+    expect(commandRequests(handler)[0]?.headers["accept-encoding"]).toBe(ResponseCompressionGzip);
+  });
+
+  it("adds response Accept-Encoding after SigV4 signing", async () => {
+    const handler = new RecordingHandler(() => ({ TableNames: [] }));
+    const client = new AlternatorDynamoDBClient({
+      seeds: ["seed"],
+      requestHandler: handler,
+      discovery: { background: false },
+      credentials: {
+        accessKeyId: "key",
+        secretAccessKey: "secret",
+      },
+      responseCompression: {
+        enabled: true,
+        encodings: [ResponseCompressionGzip],
+      },
+    });
+
+    await client.send(new ListTablesCommand({}));
+
+    const headers = commandRequests(handler)[0]?.headers ?? {};
+    expect(headers["accept-encoding"]).toBe(ResponseCompressionGzip);
+    expect(signedHeaderNames(headers.authorization)).not.toContain("accept-encoding");
+  });
+
   it("uses header whitelisting when enabled", async () => {
     const handler = new RecordingHandler(() => ({ TableNames: [] }));
     const client = new AlternatorDynamoDBClient({
@@ -325,6 +423,23 @@ describe("Alternator middleware", () => {
     expect(client.getPartitionKeyName("users")).toBe("id");
   });
 });
+
+function compressedJsonResponse(
+  payload: unknown,
+  contentEncoding: string,
+  compress: (input: string) => Uint8Array,
+): HttpResponse {
+  const body = compress(JSON.stringify(payload));
+  return new HttpResponse({
+    statusCode: 200,
+    headers: {
+      "content-type": "application/x-amz-json-1.0",
+      "content-encoding": contentEncoding,
+      "content-length": String(body.byteLength),
+    },
+    body: Readable.from([body]),
+  });
+}
 
 function signedHeaderNames(authorization: string | undefined): string[] {
   const match = authorization?.match(/(?:^|,\s*)SignedHeaders=([^,\s]+)/);

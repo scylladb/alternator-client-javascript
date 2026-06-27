@@ -1,5 +1,9 @@
 export { AlternatorDynamoDBClient } from "./client.js";
 export { routing } from "./routing.js";
+export {
+  ResponseCompressionDeflate,
+  ResponseCompressionGzip,
+} from "./types.js";
 export type {
   AlternatorCompressionOptions,
   AlternatorConnectionOptions,
@@ -11,6 +15,8 @@ export type {
   AlternatorLogger,
   AlternatorNode,
   AlternatorPartitionKeyByTable,
+  AlternatorResponseCompression,
+  AlternatorResponseCompressionOptions,
   AlternatorRuntime,
   AlternatorScheme,
   AlternatorRequestCompressor,
@@ -19,6 +25,7 @@ export type {
   AlternatorUserAgentConfig,
   AlternatorUserAgentOptions,
   AlternatorUserAgentTransformer,
+  ResponseCompression,
 } from "./types.js";
 export type {
   ClusterRoutingRule,
