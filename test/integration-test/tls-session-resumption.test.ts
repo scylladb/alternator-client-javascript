@@ -18,7 +18,6 @@ describeIntegration.each(httpsIntegrationEndpoints())(
         for (let index = 0; index < 10; index += 1) {
           await client.send(new ListTablesCommand({ Limit: 1 }));
         }
-        expect(client.alternatorConfig.tls?.sessionCache).toBeUndefined();
       } finally {
         client.destroy();
       }
@@ -36,7 +35,6 @@ describeIntegration.each(httpsIntegrationEndpoints())(
         for (let index = 0; index < 5; index += 1) {
           await client.send(new ListTablesCommand({ Limit: 1 }));
         }
-        expect(client.alternatorConfig.tls?.sessionCache).toBe(false);
       } finally {
         client.destroy();
       }
@@ -53,9 +51,8 @@ describeIntegration.each(httpsIntegrationEndpoints())(
       });
 
       try {
-        await expect(client.refreshLiveNodes()).resolves.not.toHaveLength(0);
+        await expect(client.alternator.refreshNodes()).resolves.not.toHaveLength(0);
         await expect(client.send(new ListTablesCommand({ Limit: 1 }))).resolves.toBeDefined();
-        expect(client.alternatorConfig.tls?.sessionCache).toBe(true);
       } finally {
         client.destroy();
       }

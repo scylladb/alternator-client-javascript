@@ -1,4 +1,4 @@
-import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import type { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
   DynamoDBDocumentClient,
   type TranslateConfig,
@@ -6,32 +6,28 @@ import {
 import { AlternatorDynamoDBClient } from "./client.js";
 import type { AlternatorDynamoDBClientConfig } from "./types.js";
 
-type InternalDocumentClientConstructor = new (
-  client: DynamoDBClient,
-  translateConfig?: TranslateConfig,
-) => AlternatorDynamoDBDocumentClient;
-
 export class AlternatorDynamoDBDocumentClient extends DynamoDBDocumentClient {
-  private readonly ownedClient: AlternatorDynamoDBClient | undefined;
-
-  constructor(config: AlternatorDynamoDBClientConfig, translateConfig?: TranslateConfig);
-  constructor(configOrClient: AlternatorDynamoDBClientConfig | DynamoDBClient, translateConfig?: TranslateConfig) {
-    let ownedClient: AlternatorDynamoDBClient | undefined;
-    const client =
-      configOrClient instanceof DynamoDBClient
-        ? configOrClient
-        : (ownedClient = new AlternatorDynamoDBClient(configOrClient));
+  private constructor(
+    client: DynamoDBClient,
+    translateConfig?: TranslateConfig,
+    private readonly ownedClient?: AlternatorDynamoDBClient,
+  ) {
     super(client, translateConfig);
-    this.ownedClient = ownedClient;
   }
 
   static override from(
     client: DynamoDBClient,
     translateConfig?: TranslateConfig,
   ): AlternatorDynamoDBDocumentClient {
-    const InternalDocumentClient =
-      AlternatorDynamoDBDocumentClient as unknown as InternalDocumentClientConstructor;
-    return new InternalDocumentClient(client, translateConfig);
+    return new AlternatorDynamoDBDocumentClient(client, translateConfig);
+  }
+
+  static fromConfig(
+    config: AlternatorDynamoDBClientConfig,
+    translateConfig?: TranslateConfig,
+  ): AlternatorDynamoDBDocumentClient {
+    const client = new AlternatorDynamoDBClient(config);
+    return new AlternatorDynamoDBDocumentClient(client, translateConfig, client);
   }
 
   override destroy(): void {

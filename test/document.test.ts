@@ -8,7 +8,7 @@ import { commandRequests, RecordingHandler, requestBodyJson } from "./helpers.js
 describe("AlternatorDynamoDBDocumentClient", () => {
   it("constructs an Alternator low-level client and marshals document commands", async () => {
     const handler = new RecordingHandler(() => ({}));
-    const docClient = new AlternatorDynamoDBDocumentClient(
+    const docClient = AlternatorDynamoDBDocumentClient.fromConfig(
       {
         seeds: ["seed"],
         requestHandler: handler,
@@ -54,7 +54,7 @@ describe("AlternatorDynamoDBDocumentClient", () => {
       requestHandler: handler,
       discovery: { background: false },
     });
-    await base.refreshLiveNodes();
+    await base.alternator.refreshNodes();
 
     const docClient = AlternatorDynamoDBDocumentClient.from(base);
     await docClient.send(new PutCommand({ TableName: "users", Item: { id: "u1" } }));
@@ -81,7 +81,7 @@ describe("AlternatorDynamoDBDocumentClient", () => {
     await docClient.send(new PutCommand({ TableName: "users", Item: { id: "u1" } }));
 
     expect(commandRequests(handler)[0]?.hostname).toBe("aws-style.local");
-    expect("getLiveNodes" in docClient).toBe(false);
+    expect("alternator" in docClient).toBe(false);
   });
 
   it("destroys the owned low-level client and stops background discovery", async () => {
@@ -92,7 +92,7 @@ describe("AlternatorDynamoDBDocumentClient", () => {
       }
       return {};
     });
-    const docClient = new AlternatorDynamoDBDocumentClient({
+    const docClient = AlternatorDynamoDBDocumentClient.fromConfig({
       seeds: ["seed"],
       requestHandler: handler,
       discovery: {

@@ -9,11 +9,7 @@ import type { FinalizeRequestMiddleware } from "@smithy/types";
 import { Readable } from "node:stream";
 import { deflateSync, gunzipSync, gzipSync } from "node:zlib";
 import { describe, expect, it, vi } from "vitest";
-import {
-  AlternatorDynamoDBClient,
-  ResponseCompressionDeflate,
-  ResponseCompressionGzip,
-} from "../src/index.js";
+import { AlternatorDynamoDBClient } from "../src/index.js";
 import { alternatorUserAgentToken } from "../src/user-agent.js";
 import { commandRequests, jsonResponse, RecordingHandler } from "./helpers.js";
 
@@ -31,7 +27,7 @@ describe("Alternator middleware", () => {
       discovery: { background: false },
     });
 
-    await client.refreshLiveNodes();
+    await client.alternator.refreshNodes();
     await client.send(new ListTablesCommand({}));
     await client.send(new ListTablesCommand({}));
 
@@ -65,7 +61,7 @@ describe("Alternator middleware", () => {
     vi.spyOn(Math, "random").mockReturnValue(0);
 
     try {
-      await client.refreshLiveNodes();
+      await client.alternator.refreshNodes();
       await client.send(new ListTablesCommand({}));
     } finally {
       vi.restoreAllMocks();
@@ -95,7 +91,7 @@ describe("Alternator middleware", () => {
       maxAttempts: 3,
     });
 
-    await client.refreshLiveNodes();
+    await client.alternator.refreshNodes();
     await client.send(new ListTablesCommand({}));
 
     expect(commandAttempts).toBe(3);
@@ -189,7 +185,7 @@ describe("Alternator middleware", () => {
       seeds: ["seed"],
       requestHandler: handler,
       discovery: { background: false },
-      compression: { request: true },
+      compression: { request: {} },
     });
 
     await client.send(
@@ -211,9 +207,9 @@ describe("Alternator middleware", () => {
   });
 
   it.each([
-    [ResponseCompressionGzip, gzipSync],
-    [ResponseCompressionDeflate, deflateSync],
-  ])("requests and decodes %s response compression", async (encoding, compress) => {
+    ["gzip", gzipSync],
+    ["deflate", deflateSync],
+  ] as const)("requests and decodes %s response compression", async (encoding, compress) => {
     const handler = new RecordingHandler((request) => {
       if (request.path === "/localnodes") {
         return ["node-a"];
@@ -232,7 +228,6 @@ describe("Alternator middleware", () => {
       discovery: { background: false },
       compression: {
         response: {
-          enabled: true,
           algorithms: [encoding],
         },
       },
@@ -252,8 +247,7 @@ describe("Alternator middleware", () => {
       discovery: { background: false },
       compression: {
         response: {
-          enabled: true,
-          algorithms: [ResponseCompressionGzip],
+          algorithms: ["gzip"],
         },
       },
     });
@@ -274,7 +268,7 @@ describe("Alternator middleware", () => {
 
     await client.send(new ListTablesCommand({}));
 
-    expect(commandRequests(handler)[0]?.headers["accept-encoding"]).toBe(ResponseCompressionGzip);
+    expect(commandRequests(handler)[0]?.headers["accept-encoding"]).toBe("gzip");
   });
 
   it("adds response Accept-Encoding after SigV4 signing", async () => {
@@ -289,8 +283,7 @@ describe("Alternator middleware", () => {
       },
       compression: {
         response: {
-          enabled: true,
-          algorithms: [ResponseCompressionGzip],
+          algorithms: ["gzip"],
         },
       },
     });
@@ -298,7 +291,7 @@ describe("Alternator middleware", () => {
     await client.send(new ListTablesCommand({}));
 
     const headers = commandRequests(handler)[0]?.headers ?? {};
-    expect(headers["accept-encoding"]).toBe(ResponseCompressionGzip);
+    expect(headers["accept-encoding"]).toBe("gzip");
     expect(signedHeaderNames(headers.authorization)).not.toContain("accept-encoding");
   });
 
@@ -348,13 +341,13 @@ describe("Alternator middleware", () => {
       seeds: ["seed"],
       requestHandler: replacements,
       discovery: { background: false },
-      userAgent: "custom-client/1.2.3",
+      userAgent: { value: "custom-client/1.2.3" },
     });
     const transformedClient = new AlternatorDynamoDBClient({
       seeds: ["seed"],
       requestHandler: transformed,
       discovery: { background: false },
-      userAgent: (userAgent) => `${userAgent} app/4.5.6`,
+      userAgent: { append: "app/4.5.6" },
     });
     const removedClient = new AlternatorDynamoDBClient({
       seeds: ["seed"],
@@ -403,14 +396,14 @@ describe("Alternator middleware", () => {
       requestHandler: handler,
       discovery: { background: false },
       keyRouteAffinity: {
-        type: "any-write",
+        mode: "any-write",
         partitionKeys: {
           users: "id",
         },
       },
     });
 
-    await client.refreshLiveNodes();
+    await client.alternator.refreshNodes();
     await client.send(
       new PutItemCommand({
         TableName: "users",
@@ -426,7 +419,7 @@ describe("Alternator middleware", () => {
 
     const [first, second] = commandRequests(handler);
     expect(first?.hostname).toBe(second?.hostname);
-    expect(client.getPartitionKeyName("users")).toBe("id");
+    expect(client.alternator.partitionKey("users")).toBe("id");
   });
 });
 

@@ -20,7 +20,7 @@ describe("Alternator discovery", () => {
       discovery: { background: false },
     });
 
-    await expect(client.refreshLiveNodes()).resolves.toEqual([
+    await expect(client.alternator.refreshNodes()).resolves.toEqual([
       {
         host: "node-a.internal",
         scheme: "http",
@@ -34,7 +34,7 @@ describe("Alternator discovery", () => {
         url: "http://node-b.internal:8080",
       },
     ]);
-    expect(client.getLiveNodes().map((node) => node.host)).toEqual([
+    expect(client.alternator.nodes().map((node) => node.host)).toEqual([
       "node-a.internal",
       "node-b.internal",
     ]);
@@ -60,15 +60,15 @@ describe("Alternator discovery", () => {
       routing: routing.cluster(),
     });
 
-    await client.refreshLiveNodes();
+    await client.alternator.refreshNodes();
 
-    expect(client.getLiveNodes().map((node) => node.host)).toEqual([
+    expect(client.alternator.nodes().map((node) => node.host)).toEqual([
       "dc1-a.internal",
       "dc1-b.internal",
       "dc2-a.internal",
       "dc2-b.internal",
     ]);
-    await client.refreshLiveNodes();
+    await client.alternator.refreshNodes();
 
     expect(handler.requests.map((request) => request.hostname)).toEqual([
       "seed-dc1.internal",
@@ -98,14 +98,17 @@ describe("Alternator discovery", () => {
       seeds: ["seed"],
       requestHandler: handler,
       discovery: { background: false },
-      routing: routing.rack("dc1", "rack1", {
-        fallback: routing.datacenter("dc1", {
+      routing: routing.rack({
+        datacenter: "dc1",
+        rack: "rack1",
+        fallback: routing.datacenter({
+          datacenter: "dc1",
           fallback: routing.cluster(),
         }),
       }),
     });
 
-    await client.refreshLiveNodes();
+    await client.alternator.refreshNodes();
 
     expect(seenQueries).toEqual([
       missingDatacenterQuery,
@@ -113,7 +116,7 @@ describe("Alternator discovery", () => {
       { dc: "dc1", rack: "rack1" },
       { dc: "dc1" },
     ]);
-    expect(client.getLiveNodes().map((node) => node.host)).toEqual(["dc-node"]);
+    expect(client.alternator.nodes().map((node) => node.host)).toEqual(["dc-node"]);
   });
 
   it("detects rack/datacenter query support", async () => {
@@ -122,14 +125,14 @@ describe("Alternator discovery", () => {
       requestHandler: new RecordingHandler((request) => (request.query.dc || request.query.rack ? [] : ["seed"])),
       discovery: { background: false },
     });
-    await expect(supported.checkRackDatacenterSupport()).resolves.toBe(true);
+    await expect(supported.alternator.supportsScopedDiscovery()).resolves.toBe(true);
 
     const unsupported = new AlternatorDynamoDBClient({
       seeds: ["seed"],
       requestHandler: new RecordingHandler(() => ["seed"]),
       discovery: { background: false },
     });
-    await expect(unsupported.checkRackDatacenterSupport()).resolves.toBe(false);
+    await expect(unsupported.alternator.supportsScopedDiscovery()).resolves.toBe(false);
   });
 
   it("falls back instead of accepting scoped nodes when rack/datacenter filters are unsupported", async () => {
@@ -145,20 +148,23 @@ describe("Alternator discovery", () => {
       seeds: ["seed"],
       requestHandler: handler,
       discovery: { background: false },
-      routing: routing.rack("dc1", "rack1", {
-        fallback: routing.datacenter("dc1", {
+      routing: routing.rack({
+        datacenter: "dc1",
+        rack: "rack1",
+        fallback: routing.datacenter({
+          datacenter: "dc1",
           fallback: routing.cluster(),
         }),
       }),
     });
 
-    await client.refreshLiveNodes();
+    await client.alternator.refreshNodes();
 
     expect(seenQueries).toEqual([
       missingDatacenterQuery,
       {},
     ]);
-    expect(client.getLiveNodes().map((node) => node.host)).toEqual(["cluster-node"]);
+    expect(client.alternator.nodes().map((node) => node.host)).toEqual(["cluster-node"]);
   });
 
   it("falls back from rack scope to datacenter scope when only rack filters are unsupported", async () => {
@@ -183,21 +189,24 @@ describe("Alternator discovery", () => {
       seeds: ["seed"],
       requestHandler: handler,
       discovery: { background: false },
-      routing: routing.rack("dc1", "rack1", {
-        fallback: routing.datacenter("dc1", {
+      routing: routing.rack({
+        datacenter: "dc1",
+        rack: "rack1",
+        fallback: routing.datacenter({
+          datacenter: "dc1",
           fallback: routing.cluster(),
         }),
       }),
     });
 
-    await client.refreshLiveNodes();
+    await client.alternator.refreshNodes();
 
     expect(seenQueries).toEqual([
       missingDatacenterQuery,
       missingRackQuery,
       { dc: "dc1" },
     ]);
-    expect(client.getLiveNodes().map((node) => node.host)).toEqual(["dc-node"]);
+    expect(client.alternator.nodes().map((node) => node.host)).toEqual(["dc-node"]);
   });
 
   it("validates configured rack/datacenter scopes", async () => {
@@ -210,19 +219,21 @@ describe("Alternator discovery", () => {
         return [];
       }),
       discovery: { background: false },
-      routing: routing.datacenter("dc1"),
+      routing: routing.datacenter({ datacenter: "dc1" }),
     });
-    await expect(valid.checkIfRackAndDatacenterSetCorrectly()).resolves.toBeUndefined();
+    await expect(valid.alternator.validateRouting()).resolves.toBeUndefined();
 
     const invalid = new AlternatorDynamoDBClient({
       seeds: ["seed"],
       requestHandler: new RecordingHandler(() => []),
       discovery: { background: false },
-      routing: routing.rack("dc1", "rack1", {
-        fallback: routing.datacenter("dc1"),
+      routing: routing.rack({
+        datacenter: "dc1",
+        rack: "rack1",
+        fallback: routing.datacenter({ datacenter: "dc1" }),
       }),
     });
-    await expect(invalid.validateRackDatacenterConfig()).rejects.toThrow(/has no nodes/);
+    await expect(invalid.alternator.validateRouting()).rejects.toThrow(/has no nodes/);
   });
 
   it("rejects rack/datacenter validation when scope filters are unsupported", async () => {
@@ -230,12 +241,13 @@ describe("Alternator discovery", () => {
       seeds: ["seed"],
       requestHandler: new RecordingHandler(() => ["seed"]),
       discovery: { background: false },
-      routing: routing.datacenter("dc1", {
+      routing: routing.datacenter({
+        datacenter: "dc1",
         fallback: routing.cluster(),
       }),
     });
 
-    await expect(client.validateRackDatacenterConfig()).rejects.toThrow(/does not support datacenter/);
+    await expect(client.alternator.validateRouting()).rejects.toThrow(/does not support datacenter/);
   });
 
   it("uses request-triggered discovery in edge runtime", async () => {

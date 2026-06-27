@@ -15,12 +15,12 @@ import { HttpRequest } from "@smithy/protocol-http";
 import type { FinalizeRequestMiddleware } from "@smithy/types";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import type { AlternatorDynamoDBClientConfig } from "../../src/index.js";
+import type { AlternatorNodeDynamoDBClientConfig } from "../../src/index.js";
 import { AlternatorDynamoDBClient } from "../../src/index.js";
 import { AlternatorDynamoDBDocumentClient, type TranslateConfig } from "../../src/document.js";
 import { integrationConfig, type IntegrationEndpoint } from "./config.js";
 
-type ClientOverrides = Omit<Partial<AlternatorDynamoDBClientConfig>, "seeds" | "scheme" | "port">;
+type ClientOverrides = Omit<Partial<AlternatorNodeDynamoDBClientConfig>, "seeds" | "scheme" | "port">;
 
 export interface CapturedCommandRequest {
   readonly commandName: string | undefined;
@@ -59,7 +59,7 @@ export function buildDocumentClient(
   overrides: ClientOverrides = {},
   translateConfig?: TranslateConfig,
 ): AlternatorDynamoDBDocumentClient {
-  return new AlternatorDynamoDBDocumentClient(
+  return AlternatorDynamoDBDocumentClient.fromConfig(
     {
       ...overrides,
       seeds: [endpoint.host],

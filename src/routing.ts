@@ -1,27 +1,39 @@
-export type RoutingKind = "cluster" | "datacenter" | "rack";
+export type AlternatorRoutingScopeKind = "cluster" | "datacenter" | "rack";
 
-export interface RoutingFallbackOptions {
-  fallback?: RoutingRule;
+export interface AlternatorRoutingFallbackOptions {
+  fallback?: AlternatorRoutingScope;
 }
 
-export interface ClusterRoutingRule {
+export interface AlternatorClusterRoutingScope {
   readonly kind: "cluster";
 }
 
-export interface DatacenterRoutingRule {
+export interface AlternatorDatacenterRoutingScope {
   readonly kind: "datacenter";
   readonly datacenter: string;
-  readonly fallback?: RoutingRule;
+  readonly fallback?: AlternatorRoutingScope;
 }
 
-export interface RackRoutingRule {
+export interface AlternatorRackRoutingScope {
   readonly kind: "rack";
   readonly datacenter: string;
   readonly rack: string;
-  readonly fallback?: RoutingRule;
+  readonly fallback?: AlternatorRoutingScope;
 }
 
-export type RoutingRule = ClusterRoutingRule | DatacenterRoutingRule | RackRoutingRule;
+export type AlternatorRoutingScope =
+  | AlternatorClusterRoutingScope
+  | AlternatorDatacenterRoutingScope
+  | AlternatorRackRoutingScope;
+
+export interface AlternatorDatacenterRoutingScopeOptions extends AlternatorRoutingFallbackOptions {
+  readonly datacenter: string;
+}
+
+export interface AlternatorRackRoutingScopeOptions extends AlternatorRoutingFallbackOptions {
+  readonly datacenter: string;
+  readonly rack: string;
+}
 
 export interface LocalNodesQuery {
   readonly dc?: string;
@@ -34,30 +46,26 @@ function assertName(name: string, label: string): void {
   }
 }
 
-function cluster(): ClusterRoutingRule {
+function cluster(): AlternatorClusterRoutingScope {
   return { kind: "cluster" };
 }
 
-function datacenter(datacenterName: string, options: RoutingFallbackOptions = {}): DatacenterRoutingRule {
-  assertName(datacenterName, "datacenter");
+function datacenter(options: AlternatorDatacenterRoutingScopeOptions): AlternatorDatacenterRoutingScope {
+  assertName(options.datacenter, "datacenter");
   return {
     kind: "datacenter",
-    datacenter: datacenterName,
+    datacenter: options.datacenter,
     ...(options.fallback ? { fallback: options.fallback } : {}),
   };
 }
 
-function rack(
-  datacenterName: string,
-  rackName: string,
-  options: RoutingFallbackOptions = {},
-): RackRoutingRule {
-  assertName(datacenterName, "datacenter");
-  assertName(rackName, "rack");
+function rack(options: AlternatorRackRoutingScopeOptions): AlternatorRackRoutingScope {
+  assertName(options.datacenter, "datacenter");
+  assertName(options.rack, "rack");
   return {
     kind: "rack",
-    datacenter: datacenterName,
-    rack: rackName,
+    datacenter: options.datacenter,
+    rack: options.rack,
     ...(options.fallback ? { fallback: options.fallback } : {}),
   };
 }
@@ -68,24 +76,24 @@ export const routing = {
   rack,
 };
 
-export function routingQueries(rule: RoutingRule): LocalNodesQuery[] {
-  const query = queryForRule(rule);
-  const fallback = "fallback" in rule ? rule.fallback : undefined;
+export function routingQueries(scope: AlternatorRoutingScope): LocalNodesQuery[] {
+  const query = queryForScope(scope);
+  const fallback = "fallback" in scope ? scope.fallback : undefined;
   return fallback ? [query, ...routingQueries(fallback)] : [query];
 }
 
-export function routingChain(rule: RoutingRule): RoutingRule[] {
-  const fallback = "fallback" in rule ? rule.fallback : undefined;
-  return fallback ? [rule, ...routingChain(fallback)] : [rule];
+export function routingChain(scope: AlternatorRoutingScope): AlternatorRoutingScope[] {
+  const fallback = "fallback" in scope ? scope.fallback : undefined;
+  return fallback ? [scope, ...routingChain(fallback)] : [scope];
 }
 
-function queryForRule(rule: RoutingRule): LocalNodesQuery {
-  switch (rule.kind) {
+function queryForScope(scope: AlternatorRoutingScope): LocalNodesQuery {
+  switch (scope.kind) {
     case "cluster":
       return {};
     case "datacenter":
-      return { dc: rule.datacenter };
+      return { dc: scope.datacenter };
     case "rack":
-      return { dc: rule.datacenter, rack: rule.rack };
+      return { dc: scope.datacenter, rack: scope.rack };
   }
 }

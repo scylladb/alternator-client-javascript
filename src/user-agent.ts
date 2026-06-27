@@ -1,6 +1,7 @@
 import packageJson from "../package.json" with { type: "json" };
 import type {
   AlternatorUserAgentConfig,
+  AlternatorUserAgentOptions,
   AlternatorUserAgentTransformer,
   NormalizedUserAgentOptions,
 } from "./types.js";
@@ -17,29 +18,35 @@ export function normalizeUserAgent(input: AlternatorUserAgentConfig | undefined)
   if (input === false) {
     return {};
   }
-  if (input === undefined || input === true) {
+  if (input === undefined) {
     return { value: defaultUserAgent };
   }
-  if (typeof input === "string") {
-    requireValidUserAgent(input, "userAgent");
-    return { value: input };
+  if (!isRecord(input)) {
+    throw new TypeError("userAgent must be false or an options object");
   }
-  if (typeof input === "function") {
-    return normalizeTransformedUserAgent(input, defaultUserAgent);
+  const options = input as AlternatorUserAgentOptions;
+
+  const configuredFields = [
+    options.value !== undefined,
+    options.append !== undefined,
+    options.transform !== undefined,
+  ].filter(Boolean).length;
+  if (configuredFields > 1) {
+    throw new TypeError("userAgent.value, userAgent.append, and userAgent.transform are mutually exclusive");
   }
-  if (input.enabled === false) {
-    return {};
+
+  if (options.value !== undefined) {
+    requireValidUserAgent(options.value, "userAgent.value");
+    return { value: options.value };
   }
-  if (input.value !== undefined && input.transform !== undefined) {
-    throw new TypeError("userAgent.value and userAgent.transform cannot both be set");
+  if (options.append !== undefined) {
+    requireValidUserAgent(options.append, "userAgent.append");
+    return { value: `${defaultUserAgent} ${options.append}` };
   }
-  if (input.value !== undefined) {
-    requireValidUserAgent(input.value, "userAgent.value");
-    return { value: input.value };
+  if (options.transform !== undefined) {
+    return normalizeTransformedUserAgent(options.transform, defaultUserAgent);
   }
-  if (input.transform !== undefined) {
-    return normalizeTransformedUserAgent(input.transform, defaultUserAgent);
-  }
+
   return { value: defaultUserAgent };
 }
 
@@ -67,6 +74,10 @@ export function applyUserAgent(
   }
 
   return nextHeaders;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 function normalizeTransformedUserAgent(

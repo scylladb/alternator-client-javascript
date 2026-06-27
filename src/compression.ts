@@ -1,6 +1,5 @@
 import { HttpResponse } from "@smithy/protocol-http";
 import { bodyToBytes } from "./body.js";
-import { ResponseCompressionDeflate, ResponseCompressionGzip } from "./types.js";
 import type {
   AlternatorResponseCompressionAlgorithm,
   AlternatorRuntime,
@@ -125,14 +124,14 @@ async function decompressNodeResponseBody(
   const zlib = await import("node:zlib");
 
   if (isNodePipeableBody(body)) {
-    const decoder = encoding === ResponseCompressionGzip
+    const decoder = encoding === "gzip"
       ? zlib.createGunzip()
       : zlib.createInflate();
     return body.pipe(decoder);
   }
 
   const bytes = await bodyToAsyncBytes(body);
-  return encoding === ResponseCompressionGzip
+  return encoding === "gzip"
     ? zlib.gunzipSync(bytes)
     : zlib.inflateSync(bytes);
 }
@@ -188,10 +187,10 @@ async function bodyToAsyncBytes(body: unknown): Promise<Uint8Array> {
 
 function responseContentEncoding(value: string | undefined): AlternatorResponseCompressionAlgorithm | undefined {
   switch (value?.trim().toLowerCase()) {
-    case ResponseCompressionGzip:
-      return ResponseCompressionGzip;
-    case ResponseCompressionDeflate:
-      return ResponseCompressionDeflate;
+    case "gzip":
+      return "gzip";
+    case "deflate":
+      return "deflate";
     default:
       return undefined;
   }

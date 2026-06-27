@@ -6,7 +6,11 @@ import type {
 } from "@smithy/types";
 import type { HttpHandler, HttpHandlerUserInput, HttpRequest, HttpResponse } from "@smithy/protocol-http";
 import { decompressResponse } from "./compression.js";
-import type { AlternatorDynamoDBClientConfig, NormalizedAlternatorConfig } from "./types.js";
+import type {
+  AlternatorDynamoDBClientConfig,
+  AlternatorTlsMaterial,
+  NormalizedAlternatorConfig,
+} from "./types.js";
 
 type Handler = HttpHandler<NodeHttpHandlerOptions>;
 type GenericHttpHandler = HttpHandler<Record<string, unknown>>;
@@ -21,13 +25,16 @@ export function assertRuntimeSupport(config: NormalizedAlternatorConfig): void {
   }
 
   const connection = config.connection;
-  if (connection?.maxSockets !== undefined) {
+  if (connection && "maxSockets" in connection && connection.maxSockets !== undefined) {
     throw new Error("Alternator edge runtime does not support socket pool tuning");
   }
-  if (connection?.socketTimeoutMs !== undefined || connection?.connectionTimeoutMs !== undefined) {
+  if (
+    (connection?.timeouts && "socketMs" in connection.timeouts && connection.timeouts.socketMs !== undefined) ||
+    (connection?.timeouts && "connectMs" in connection.timeouts && connection.timeouts.connectMs !== undefined)
+  ) {
     throw new Error("Alternator edge runtime does not support Node socket timeout options");
   }
-  if (connection?.node !== undefined) {
+  if (connection && "node" in connection && connection.node !== undefined) {
     throw new Error("Alternator edge runtime does not support Node HTTP handler options");
   }
 
@@ -50,10 +57,10 @@ export function createRequestHandler(
 
   if (config.runtime === "edge") {
     const fetchOptions = {
-      ...config.connection?.fetch,
+      ...(config.connection && "fetch" in config.connection ? config.connection.fetch : undefined),
     };
-    if (config.connection?.requestTimeoutMs !== undefined) {
-      fetchOptions.requestTimeout = config.connection.requestTimeoutMs;
+    if (config.connection?.timeouts?.requestMs !== undefined) {
+      fetchOptions.requestTimeout = config.connection.timeouts.requestMs;
     }
     if (config.connection?.keepAlive !== undefined) {
       fetchOptions.keepAlive = config.connection.keepAlive;
@@ -182,20 +189,20 @@ async function buildNodeHandlerOptions(
   const connection = config.connection;
   const tls = config.tls;
   const keepAlive = connection?.keepAlive ?? true;
-  const maxSockets = connection?.maxSockets ?? 50;
+  const maxSockets = connection && "maxSockets" in connection ? connection.maxSockets ?? 50 : 50;
 
   const httpAgent: Record<string, unknown> = { keepAlive, maxSockets };
   const httpsAgent: Record<string, unknown> = { keepAlive, maxSockets };
 
   if (tls) {
     if (tls.ca !== undefined) {
-      httpsAgent.ca = tls.ca;
+      httpsAgent.ca = await tlsMaterialValue(tls.ca);
     }
     if (tls.cert !== undefined) {
-      httpsAgent.cert = tls.cert;
+      httpsAgent.cert = await tlsMaterialValue(tls.cert);
     }
     if (tls.key !== undefined) {
-      httpsAgent.key = tls.key;
+      httpsAgent.key = await tlsMaterialValue(tls.key);
     }
     if (tls.rejectUnauthorized !== undefined) {
       httpsAgent.rejectUnauthorized = tls.rejectUnauthorized;
@@ -204,38 +211,37 @@ async function buildNodeHandlerOptions(
       httpsAgent.maxCachedSessions = 0;
     }
 
-    if (tls.caFile || tls.certFile || tls.keyFile) {
-      const fs = await import("node:fs/promises");
-      if (tls.caFile) {
-        httpsAgent.ca = await fs.readFile(tls.caFile);
-      }
-      if (tls.certFile) {
-        httpsAgent.cert = await fs.readFile(tls.certFile);
-      }
-      if (tls.keyFile) {
-        httpsAgent.key = await fs.readFile(tls.keyFile);
-      }
-    }
   }
 
   const options: NodeHttpHandlerOptions = {
     httpAgent,
     httpsAgent,
-    ...connection?.node,
+    ...(connection && "node" in connection ? connection.node : undefined),
   };
 
-  if (connection?.requestTimeoutMs !== undefined) {
-    options.requestTimeout = connection.requestTimeoutMs;
+  if (connection?.timeouts?.requestMs !== undefined) {
+    options.requestTimeout = connection.timeouts.requestMs;
   }
-  if (connection?.connectionTimeoutMs !== undefined) {
-    options.connectionTimeout = connection.connectionTimeoutMs;
+  if (connection?.timeouts && "connectMs" in connection.timeouts && connection.timeouts.connectMs !== undefined) {
+    options.connectionTimeout = connection.timeouts.connectMs;
   }
-  if (connection?.socketTimeoutMs !== undefined) {
-    options.socketTimeout = connection.socketTimeoutMs;
+  if (connection?.timeouts && "socketMs" in connection.timeouts && connection.timeouts.socketMs !== undefined) {
+    options.socketTimeout = connection.timeouts.socketMs;
   }
-  if (connection?.throwOnRequestTimeout !== undefined) {
+  if (connection && "throwOnRequestTimeout" in connection && connection.throwOnRequestTimeout !== undefined) {
     options.throwOnRequestTimeout = connection.throwOnRequestTimeout;
   }
 
   return options;
+}
+
+async function tlsMaterialValue(material: AlternatorTlsMaterial): Promise<string | Uint8Array> {
+  if ("file" in material) {
+    const fs = await import("node:fs/promises");
+    return fs.readFile(material.file);
+  }
+  if ("bytes" in material) {
+    return material.bytes;
+  }
+  return material.text;
 }

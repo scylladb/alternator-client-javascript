@@ -1,23 +1,25 @@
 export { AlternatorDynamoDBClient } from "./client.js";
 export { routing } from "./routing.js";
-export {
-  ResponseCompressionDeflate,
-  ResponseCompressionGzip,
-} from "./types.js";
+export type { AlternatorDynamoDBClientApi } from "./client.js";
 export type {
   AlternatorCompressionOptions,
   AlternatorConnectionOptions,
+  AlternatorConnectionTimeoutOptions,
   AlternatorDiscoveryOptions,
   AlternatorDynamoDBClientConfig,
+  AlternatorEdgeConnectionOptions,
+  AlternatorEdgeDynamoDBClientConfig,
   AlternatorHeaderOptimizationOptions,
+  AlternatorKeyRouteAffinityConfig,
+  AlternatorKeyRouteAffinityMode,
   AlternatorKeyRouteAffinityOptions,
-  AlternatorKeyRouteAffinityType,
   AlternatorLogger,
+  AlternatorNodeConnectionOptions,
+  AlternatorNodeDynamoDBClientConfig,
   AlternatorNode,
   AlternatorPartitionKeyByTable,
   AlternatorRequestCompressionConfig,
   AlternatorRequestCompressionOptions,
-  AlternatorResponseCompression,
   AlternatorResponseCompressionAlgorithm,
   AlternatorResponseCompressionConfig,
   AlternatorResponseCompressionOptions,
@@ -26,16 +28,19 @@ export type {
   AlternatorRequestCompressor,
   AlternatorRequestCompressorResult,
   AlternatorTlsOptions,
+  AlternatorTlsMaterial,
   AlternatorUserAgentConfig,
   AlternatorUserAgentOptions,
   AlternatorUserAgentTransformer,
-  ResponseCompression,
+  NonEmptyReadonlyArray,
 } from "./types.js";
 export type {
-  ClusterRoutingRule,
-  DatacenterRoutingRule,
-  RackRoutingRule,
-  RoutingFallbackOptions,
-  RoutingKind,
-  RoutingRule,
+  AlternatorClusterRoutingScope,
+  AlternatorDatacenterRoutingScope,
+  AlternatorDatacenterRoutingScopeOptions,
+  AlternatorRackRoutingScope,
+  AlternatorRackRoutingScopeOptions,
+  AlternatorRoutingFallbackOptions,
+  AlternatorRoutingScope,
+  AlternatorRoutingScopeKind,
 } from "./routing.js";

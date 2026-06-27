@@ -1,11 +1,12 @@
 import type { DynamoDBClientConfig } from "@aws-sdk/client-dynamodb";
 import type { FetchHttpHandlerOptions, NodeHttpHandlerOptions } from "@smithy/types";
-import type { RoutingRule } from "./routing.js";
+import type { AlternatorRoutingScope } from "./routing.js";
 
 export type AlternatorScheme = "http" | "https";
 export type AlternatorRuntime = "node" | "edge";
-export type AlternatorKeyRouteAffinityType = "none" | "read-before-write" | "any-write";
+export type AlternatorKeyRouteAffinityMode = "read-before-write" | "any-write";
 export type AlternatorUserAgentTransformer = (userAgent: string) => string | null | undefined;
+export type NonEmptyReadonlyArray<T> = readonly [T, ...T[]];
 
 export interface AlternatorLogger {
   debug?: (...content: unknown[]) => void;
@@ -22,30 +23,19 @@ export interface AlternatorNode {
 }
 
 export interface AlternatorRequestCompressionOptions {
-  enabled?: boolean;
   thresholdBytes?: number;
   gzipLevel?: number;
   compressor?: AlternatorRequestCompressor;
 }
 
-export type AlternatorRequestCompressionConfig = boolean | AlternatorRequestCompressionOptions;
-
-export const ResponseCompressionGzip = "gzip" as const;
-export const ResponseCompressionDeflate = "deflate" as const;
-
-export type AlternatorResponseCompressionAlgorithm =
-  | typeof ResponseCompressionGzip
-  | typeof ResponseCompressionDeflate;
-
-export type AlternatorResponseCompression = AlternatorResponseCompressionAlgorithm;
-export type ResponseCompression = AlternatorResponseCompressionAlgorithm;
+export type AlternatorRequestCompressionConfig = false | AlternatorRequestCompressionOptions;
+export type AlternatorResponseCompressionAlgorithm = "gzip" | "deflate";
 
 export interface AlternatorResponseCompressionOptions {
-  enabled?: boolean;
   algorithms?: readonly AlternatorResponseCompressionAlgorithm[];
 }
 
-export type AlternatorResponseCompressionConfig = boolean | AlternatorResponseCompressionOptions;
+export type AlternatorResponseCompressionConfig = false | AlternatorResponseCompressionOptions;
 
 export interface AlternatorCompressionOptions {
   request?: AlternatorRequestCompressionConfig;
@@ -63,42 +53,37 @@ export type AlternatorRequestCompressor = (
 ) => AlternatorRequestCompressorResult | Promise<AlternatorRequestCompressorResult>;
 
 export interface AlternatorHeaderOptimizationOptions {
-  enabled?: boolean;
   allowedHeaders?: readonly string[];
-  /**
-   * @deprecated Use allowedHeaders. Header optimization uses a whitelist, not a strip-list.
-   */
-  stripHeaders?: readonly string[];
+  additionalAllowedHeaders?: readonly string[];
 }
 
 export interface AlternatorUserAgentOptions {
-  enabled?: boolean;
   value?: string;
+  append?: string;
   transform?: AlternatorUserAgentTransformer;
 }
 
-export type AlternatorUserAgentConfig =
-  | boolean
-  | string
-  | AlternatorUserAgentTransformer
-  | AlternatorUserAgentOptions;
+export type AlternatorUserAgentConfig = false | AlternatorUserAgentOptions;
 
-export type AlternatorPartitionKeyByTable = Record<string, string>;
+export type AlternatorPartitionKeyByTable = Record<string, string> | ReadonlyMap<string, string>;
 
 export interface AlternatorKeyRouteAffinityOptions {
-  enabled?: boolean;
-  type?: AlternatorKeyRouteAffinityType;
+  mode?: AlternatorKeyRouteAffinityMode;
   partitionKeys?: AlternatorPartitionKeyByTable;
   autoDiscoverPartitionKeys?: boolean;
 }
 
+export type AlternatorKeyRouteAffinityConfig = false | AlternatorKeyRouteAffinityOptions;
+
+export type AlternatorTlsMaterial =
+  | { readonly text: string }
+  | { readonly bytes: Uint8Array }
+  | { readonly file: string };
+
 export interface AlternatorTlsOptions {
-  ca?: string | Uint8Array;
-  caFile?: string;
-  cert?: string | Uint8Array;
-  certFile?: string;
-  key?: string | Uint8Array;
-  keyFile?: string;
+  ca?: AlternatorTlsMaterial;
+  cert?: AlternatorTlsMaterial;
+  key?: AlternatorTlsMaterial;
   rejectUnauthorized?: boolean;
   sessionCache?: boolean;
 }
@@ -110,40 +95,66 @@ export interface AlternatorDiscoveryOptions {
   timeoutMs?: number;
 }
 
-export interface AlternatorConnectionOptions {
+export interface AlternatorConnectionTimeoutOptions {
+  connectMs?: number;
+  requestMs?: number;
+  socketMs?: number;
+}
+
+export interface AlternatorNodeConnectionOptions {
   keepAlive?: boolean;
   maxSockets?: number;
-  connectionTimeoutMs?: number;
-  requestTimeoutMs?: number;
-  socketTimeoutMs?: number;
+  timeouts?: AlternatorConnectionTimeoutOptions;
   throwOnRequestTimeout?: boolean;
   node?: Omit<NodeHttpHandlerOptions, "httpAgent" | "httpsAgent">;
+}
+
+export interface AlternatorEdgeConnectionOptions {
+  keepAlive?: boolean;
+  timeouts?: Pick<AlternatorConnectionTimeoutOptions, "requestMs">;
   fetch?: FetchHttpHandlerOptions;
 }
 
+export type AlternatorConnectionOptions =
+  | AlternatorNodeConnectionOptions
+  | AlternatorEdgeConnectionOptions;
+
 type BaseDynamoDBClientConfig = Omit<
   DynamoDBClientConfig,
-  "credentials" | "endpoint" | "region" | "requestHandler" | "runtime" | "tls"
+  "credentials" | "endpoint" | "logger" | "region" | "requestHandler" | "runtime" | "tls"
 >;
 
-export interface AlternatorDynamoDBClientConfig extends BaseDynamoDBClientConfig {
-  seeds: readonly string[];
+interface BaseAlternatorDynamoDBClientConfig extends BaseDynamoDBClientConfig {
+  seeds: NonEmptyReadonlyArray<string>;
   scheme?: AlternatorScheme;
   port?: number;
-  routing?: RoutingRule;
+  routing?: AlternatorRoutingScope;
   region?: DynamoDBClientConfig["region"];
   credentials?: DynamoDBClientConfig["credentials"];
-  runtime?: AlternatorRuntime;
   requestHandler?: DynamoDBClientConfig["requestHandler"];
   compression?: AlternatorCompressionOptions;
   headerOptimization?: boolean | AlternatorHeaderOptimizationOptions;
   userAgent?: AlternatorUserAgentConfig;
-  keyRouteAffinity?: boolean | AlternatorKeyRouteAffinityOptions;
-  tls?: AlternatorTlsOptions;
+  keyRouteAffinity?: AlternatorKeyRouteAffinityConfig;
   discovery?: AlternatorDiscoveryOptions;
-  connection?: AlternatorConnectionOptions;
-  endpoint?: never;
+  logger?: AlternatorLogger;
 }
+
+export interface AlternatorNodeDynamoDBClientConfig extends BaseAlternatorDynamoDBClientConfig {
+  runtime?: "node";
+  tls?: AlternatorTlsOptions;
+  connection?: AlternatorNodeConnectionOptions;
+}
+
+export interface AlternatorEdgeDynamoDBClientConfig extends BaseAlternatorDynamoDBClientConfig {
+  runtime: "edge";
+  tls?: never;
+  connection?: AlternatorEdgeConnectionOptions;
+}
+
+export type AlternatorDynamoDBClientConfig =
+  | AlternatorNodeDynamoDBClientConfig
+  | AlternatorEdgeDynamoDBClientConfig;
 
 export interface NormalizedRequestCompressionOptions {
   readonly enabled: boolean;
@@ -173,7 +184,7 @@ export interface NormalizedUserAgentOptions {
 
 export interface NormalizedKeyRouteAffinityOptions {
   readonly enabled: boolean;
-  readonly type: AlternatorKeyRouteAffinityType;
+  readonly mode: AlternatorKeyRouteAffinityMode;
   readonly partitionKeys: ReadonlyMap<string, string>;
   readonly autoDiscoverPartitionKeys: boolean;
 }
@@ -189,7 +200,7 @@ export interface NormalizedAlternatorConfig {
   readonly seeds: readonly string[];
   readonly scheme: AlternatorScheme;
   readonly port: number;
-  readonly routing: RoutingRule;
+  readonly routing: AlternatorRoutingScope;
   readonly runtime: AlternatorRuntime;
   readonly compression: NormalizedCompressionOptions;
   readonly headerOptimization: NormalizedHeaderOptimizationOptions;

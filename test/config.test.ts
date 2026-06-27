@@ -1,15 +1,12 @@
 import { ListTablesCommand } from "@aws-sdk/client-dynamodb";
 import { describe, expect, it } from "vitest";
-import {
-  AlternatorDynamoDBClient,
-  ResponseCompressionDeflate,
-  ResponseCompressionGzip,
-} from "../src/index.js";
+import { AlternatorDynamoDBClient } from "../src/index.js";
+import { normalizeConfig } from "../src/config.js";
 import { RecordingHandler } from "./helpers.js";
 
 describe("AlternatorDynamoDBClient config", () => {
   it("requires seeds and rejects AWS endpoint", () => {
-    expect(() => new AlternatorDynamoDBClient({ seeds: [] })).toThrow(/seeds/);
+    expect(() => new AlternatorDynamoDBClient({ seeds: [] as never })).toThrow(/seeds/);
     expect(
       () =>
         new AlternatorDynamoDBClient({
@@ -27,7 +24,7 @@ describe("AlternatorDynamoDBClient config", () => {
     expect(() => new AlternatorDynamoDBClient({ seeds: ["localhost"], scheme: "ftp" as never })).toThrow(/scheme/);
     expect(() => new AlternatorDynamoDBClient({ seeds: ["localhost"], port: 0 })).toThrow(/port/);
 
-    expect(new AlternatorDynamoDBClient({ seeds: ["[::1]"] }).getLiveNodes()[0]?.url).toBe("http://[::1]:8080");
+    expect(new AlternatorDynamoDBClient({ seeds: ["[::1]"] }).alternator.nodes()[0]?.url).toBe("http://[::1]:8080");
   });
 
   it("uses Alternator defaults for URL and signing region", async () => {
@@ -38,7 +35,7 @@ describe("AlternatorDynamoDBClient config", () => {
       discovery: { background: false },
     });
 
-    expect(client.getLiveNodes()).toEqual([
+    expect(client.alternator.nodes()).toEqual([
       {
         host: "localhost",
         scheme: "http",
@@ -50,7 +47,7 @@ describe("AlternatorDynamoDBClient config", () => {
 
     await client.send(new ListTablesCommand({}));
     expect(handler.requests.at(-1)?.hostname).toBe("localhost");
-    expect(client.alternatorConfig.compression).toEqual({
+    expect(normalizeConfig({ seeds: ["localhost"] }).compression).toEqual({
       request: {
         enabled: false,
         thresholdBytes: 0,
@@ -76,8 +73,8 @@ describe("AlternatorDynamoDBClient config", () => {
         new AlternatorDynamoDBClient({
           seeds: ["localhost"],
           runtime: "edge",
-          tls: { caFile: "/tmp/ca.pem" },
-        }),
+          tls: { ca: { file: "/tmp/ca.pem" } },
+        } as never),
     ).toThrow(/edge runtime.*TLS/);
 
     expect(
@@ -86,7 +83,7 @@ describe("AlternatorDynamoDBClient config", () => {
           seeds: ["localhost"],
           runtime: "edge",
           connection: { maxSockets: 8 },
-        }),
+        } as never),
     ).toThrow(/socket pool/);
   });
 
@@ -95,7 +92,7 @@ describe("AlternatorDynamoDBClient config", () => {
       () =>
         new AlternatorDynamoDBClient({
           seeds: ["localhost"],
-          userAgent: "",
+          userAgent: "" as never,
         }),
     ).toThrow(/userAgent/);
 
@@ -108,7 +105,7 @@ describe("AlternatorDynamoDBClient config", () => {
             transform: (userAgent) => `${userAgent} app/1`,
           },
         }),
-    ).toThrow(/cannot both be set/);
+    ).toThrow(/mutually exclusive/);
   });
 
   it("rejects direct Node agent overrides in connection.node", () => {
@@ -170,7 +167,7 @@ describe("AlternatorDynamoDBClient config", () => {
         },
       },
     });
-    expect(client.getPartitionKeyName("users")).toBe("id");
+    expect(client.alternator.partitionKey("users")).toBe("id");
   });
 
   it("validates routing objects supplied from JavaScript", () => {
@@ -218,7 +215,6 @@ describe("AlternatorDynamoDBClient config", () => {
           seeds: ["localhost"],
           compression: {
             request: {
-              enabled: true,
               gzipLevel: -2,
             },
           },
@@ -237,65 +233,66 @@ describe("AlternatorDynamoDBClient config", () => {
     ).toThrow(/compression\.enabled/);
 
     expect(
-      new AlternatorDynamoDBClient({
+      normalizeConfig({
         seeds: ["localhost"],
         compression: {
           request: {
-            enabled: true,
             gzipLevel: -1,
           },
         },
-      }).alternatorConfig.compression.request.gzipLevel,
+      }).compression.request.gzipLevel,
     ).toBe(-1);
   });
 
   it("normalizes and validates response compression algorithms", () => {
     expect(
-      new AlternatorDynamoDBClient({
+      normalizeConfig({
         seeds: ["localhost"],
-        compression: { response: true },
-      }).alternatorConfig.compression.response,
+        compression: { response: {} },
+      }).compression.response,
     ).toEqual({
       enabled: true,
-      algorithms: [ResponseCompressionGzip],
+      algorithms: ["gzip"],
     });
 
     expect(
-      new AlternatorDynamoDBClient({
+      normalizeConfig({
         seeds: ["localhost"],
         compression: {
           response: {
-            enabled: true,
             algorithms: [
-              ResponseCompressionDeflate,
-              ResponseCompressionDeflate,
-              ResponseCompressionGzip,
+              "deflate",
+              "deflate",
+              "gzip",
             ],
           },
         },
-      }).alternatorConfig.compression.response,
+      }).compression.response,
     ).toEqual({
       enabled: true,
-      algorithms: [ResponseCompressionDeflate, ResponseCompressionGzip],
+      algorithms: ["deflate", "gzip"],
     });
 
     expect(
-      new AlternatorDynamoDBClient({
+      normalizeConfig({
         seeds: ["localhost"],
         compression: { response: false },
-      }).alternatorConfig.compression.response.enabled,
+      }).compression.response.enabled,
     ).toBe(false);
 
     expect(
-      new AlternatorDynamoDBClient({
+      normalizeConfig({
         seeds: ["localhost"],
         compression: {
           response: {
-            algorithms: [ResponseCompressionGzip],
+            algorithms: ["gzip"],
           },
         },
-      }).alternatorConfig.compression.response.enabled,
-    ).toBe(false);
+      }).compression.response,
+    ).toEqual({
+      enabled: true,
+      algorithms: ["gzip"],
+    });
 
     expect(
       () =>
@@ -303,7 +300,6 @@ describe("AlternatorDynamoDBClient config", () => {
           seeds: ["localhost"],
           compression: {
             response: {
-              enabled: true,
               algorithms: ["br"],
             },
           } as never,
@@ -311,26 +307,26 @@ describe("AlternatorDynamoDBClient config", () => {
     ).toThrow(/compression\.response/);
   });
 
-  it("validates key route affinity type", () => {
-    for (const type of ["bad", "", 42]) {
+  it("validates key route affinity mode", () => {
+    for (const mode of ["bad", "", 42]) {
       expect(
         () =>
           new AlternatorDynamoDBClient({
             seeds: ["localhost"],
             keyRouteAffinity: {
-              type,
+              mode,
             } as never,
           }),
-      ).toThrow(/keyRouteAffinity\.type/);
+      ).toThrow(/keyRouteAffinity\.mode/);
     }
 
     expect(
-      new AlternatorDynamoDBClient({
+      normalizeConfig({
         seeds: ["localhost"],
         keyRouteAffinity: {
-          type: "read-before-write",
+          mode: "read-before-write",
         },
-      }).alternatorConfig.keyRouteAffinity.type,
+      }).keyRouteAffinity.mode,
     ).toBe("read-before-write");
   });
 });

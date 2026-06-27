@@ -17,7 +17,7 @@ describeIntegration.each(integrationEndpoints())(
       const tableName = uniqueTableName("js_affinity_discover_it");
       const client = buildClient(endpoint, {
         keyRouteAffinity: {
-          type: "any-write",
+          mode: "any-write",
         },
       });
       const captured = captureCommandRequests(client);
@@ -25,7 +25,7 @@ describeIntegration.each(integrationEndpoints())(
       try {
         await safeDeleteTable(client, tableName);
         await createStringHashTable(client, tableName, "user_id");
-        const nodes = await client.refreshLiveNodes();
+        const nodes = await client.alternator.refreshNodes();
 
         await client.send(
           new PutItemCommand({
@@ -38,12 +38,12 @@ describeIntegration.each(integrationEndpoints())(
         );
 
         await waitFor(
-          () => client.getPartitionKeyName(tableName) === "user_id" ? "user_id" : undefined,
+          () => client.alternator.partitionKey(tableName) === "user_id" ? "user_id" : undefined,
           "partition-key autodiscovery",
         );
 
         expect(captured.some((entry) => entry.commandName === "DescribeTableCommand")).toBe(true);
-        expect(client.getPartitionKeyName(tableName)).toBe("user_id");
+        expect(client.alternator.partitionKey(tableName)).toBe("user_id");
 
         captured.length = 0;
         for (let index = 0; index < 10; index += 1) {
@@ -94,7 +94,7 @@ describeIntegration.each(integrationEndpoints())(
       const tableName = uniqueTableName("js_affinity_preconf_it");
       const client = buildClient(endpoint, {
         keyRouteAffinity: {
-          type: "any-write",
+          mode: "any-write",
           partitionKeys: {
             [tableName]: "user_id",
           },
@@ -106,7 +106,7 @@ describeIntegration.each(integrationEndpoints())(
       try {
         await safeDeleteTable(client, tableName);
         await createStringHashTable(client, tableName, "user_id");
-        const nodes = await client.refreshLiveNodes();
+        const nodes = await client.alternator.refreshNodes();
 
         for (let index = 0; index < 10; index += 1) {
           await client.send(
@@ -147,7 +147,7 @@ describeIntegration.each(integrationEndpoints())(
       const tableName = uniqueTableName("js_affinity_no_describe_it");
       const client = buildClient(endpoint, {
         keyRouteAffinity: {
-          type: "any-write",
+          mode: "any-write",
           partitionKeys: {
             [tableName]: "user_id",
           },
@@ -158,7 +158,7 @@ describeIntegration.each(integrationEndpoints())(
       try {
         await safeDeleteTable(client, tableName);
         await createStringHashTable(client, tableName, "user_id");
-        await client.refreshLiveNodes();
+        await client.alternator.refreshNodes();
 
         await client.send(
           new PutItemCommand({

@@ -2,7 +2,7 @@ import { HttpRequest } from "@smithy/protocol-http";
 import type { HttpHandlerOptions } from "@smithy/types";
 import { bodyToString } from "./body.js";
 import { hostForUrl, nodeUrl } from "./config.js";
-import { routingChain, type LocalNodesQuery, type RoutingRule } from "./routing.js";
+import { routingChain, type AlternatorRoutingScope, type LocalNodesQuery } from "./routing.js";
 import { AlternatorQueryPlan } from "./query-plan.js";
 import type { AlternatorNode, NormalizedAlternatorConfig } from "./types.js";
 
@@ -88,8 +88,8 @@ export class AlternatorDiscovery {
     let datacenterSupport: RackDatacenterSupport | undefined;
     let rackSupport: RackDatacenterSupport | undefined;
 
-    for (const rule of routingChain(this.config.routing)) {
-      if (rule.kind === "cluster") {
+    for (const scope of routingChain(this.config.routing)) {
+      if (scope.kind === "cluster") {
         return;
       }
 
@@ -97,20 +97,20 @@ export class AlternatorDiscovery {
       if (datacenterSupport === "unsupported") {
         throw new Error("Alternator /localnodes does not support datacenter query parameters");
       }
-      if (rule.kind === "rack") {
+      if (scope.kind === "rack") {
         rackSupport ??= await this.probeRackDatacenterSupport("rack");
         if (rackSupport === "unsupported") {
           throw new Error("Alternator /localnodes does not support rack query parameters");
         }
       }
 
-      const query = queryForRoutingRule(rule);
+      const query = queryForRoutingScope(scope);
       try {
         const nodes = await this.fetchFirstAvailableLocalNodes(query);
         if (nodes.length > 0) {
           return;
         }
-        errors.push(`scope ${routingRuleLabel(rule)} has no nodes`);
+        errors.push(`scope ${routingScopeLabel(scope)} has no nodes`);
       } catch (error) {
         throw new Error(`failed to read list of nodes: ${errorMessage(error)}`);
       }
@@ -134,29 +134,29 @@ export class AlternatorDiscovery {
     let datacenterSupport: RackDatacenterSupport | undefined;
     let rackSupport: RackDatacenterSupport | undefined;
 
-    for (const rule of routingChain(this.config.routing)) {
+    for (const scope of routingChain(this.config.routing)) {
       try {
         let nodes: string[];
-        if (rule.kind === "cluster") {
+        if (scope.kind === "cluster") {
           nodes = await this.fetchClusterLocalNodes();
         } else {
           datacenterSupport ??= await this.probeRackDatacenterSupport("datacenter");
           if (datacenterSupport === "unsupported") {
             this.config.logger.debug?.("alternator discovery: datacenter query parameters are unsupported", {
-              rule: routingRuleLabel(rule),
+              scope: routingScopeLabel(scope),
             });
             continue;
           }
-          if (rule.kind === "rack") {
+          if (scope.kind === "rack") {
             rackSupport ??= await this.probeRackDatacenterSupport("rack");
             if (rackSupport === "unsupported") {
               this.config.logger.debug?.("alternator discovery: rack query parameters are unsupported", {
-                rule: routingRuleLabel(rule),
+                scope: routingScopeLabel(scope),
               });
               continue;
             }
           }
-          nodes = await this.fetchFirstAvailableLocalNodes(queryForRoutingRule(rule), candidates);
+          nodes = await this.fetchFirstAvailableLocalNodes(queryForRoutingScope(scope), candidates);
         }
         if (nodes.length > 0) {
           this.liveHosts = normalizeDiscoveredHosts(nodes);
@@ -164,7 +164,7 @@ export class AlternatorDiscovery {
         }
       } catch (error) {
         this.config.logger.debug?.("alternator discovery: localnodes request failed", {
-          rule: routingRuleLabel(rule),
+          scope: routingScopeLabel(scope),
           error,
         });
       }
@@ -299,25 +299,25 @@ function hostHeader(host: string, port: number): string {
   return `${hostForUrl(host)}:${port}`;
 }
 
-function queryForRoutingRule(rule: RoutingRule): LocalNodesQuery {
-  switch (rule.kind) {
+function queryForRoutingScope(scope: AlternatorRoutingScope): LocalNodesQuery {
+  switch (scope.kind) {
     case "cluster":
       return {};
     case "datacenter":
-      return { dc: rule.datacenter };
+      return { dc: scope.datacenter };
     case "rack":
-      return { dc: rule.datacenter, rack: rule.rack };
+      return { dc: scope.datacenter, rack: scope.rack };
   }
 }
 
-function routingRuleLabel(rule: RoutingRule): string {
-  switch (rule.kind) {
+function routingScopeLabel(scope: AlternatorRoutingScope): string {
+  switch (scope.kind) {
     case "cluster":
       return "Cluster()";
     case "datacenter":
-      return `Datacenter(dc=${rule.datacenter})`;
+      return `Datacenter(dc=${scope.datacenter})`;
     case "rack":
-      return `Rack(dc=${rule.datacenter}, rack=${rule.rack})`;
+      return `Rack(dc=${scope.datacenter}, rack=${scope.rack})`;
   }
 }
 

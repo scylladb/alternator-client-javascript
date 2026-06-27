@@ -31,7 +31,7 @@ describeIntegration.each(integrationEndpoints())(
       const client = buildClient(endpoint, { requestHandler: delegate });
 
       try {
-        await expect(client.refreshLiveNodes()).resolves.not.toHaveLength(0);
+        await expect(client.alternator.refreshNodes()).resolves.not.toHaveLength(0);
         await expect(client.send(new ListTablesCommand({ Limit: 1 }))).resolves.toBeDefined();
 
         expect(handledPaths).toContain("/localnodes");
