@@ -1,6 +1,7 @@
 import { ListTablesCommand } from "@aws-sdk/client-dynamodb";
 import { describe, expect, it } from "vitest";
 import { AlternatorDynamoDBClient } from "../src/index.js";
+import { AlternatorDynamoDBClient as EdgeAlternatorDynamoDBClient } from "../src/edge.js";
 import { normalizeConfig } from "../src/config.js";
 import { RecordingHandler } from "./helpers.js";
 
@@ -70,7 +71,7 @@ describe("AlternatorDynamoDBClient config", () => {
 
     expect(
       () =>
-        new AlternatorDynamoDBClient({
+        new EdgeAlternatorDynamoDBClient({
           seeds: ["localhost"],
           runtime: "edge",
           tls: { ca: { file: "/tmp/ca.pem" } },
@@ -79,7 +80,7 @@ describe("AlternatorDynamoDBClient config", () => {
 
     expect(
       () =>
-        new AlternatorDynamoDBClient({
+        new EdgeAlternatorDynamoDBClient({
           seeds: ["localhost"],
           runtime: "edge",
           connection: { maxSockets: 8 },
@@ -106,6 +107,42 @@ describe("AlternatorDynamoDBClient config", () => {
           },
         }),
     ).toThrow(/mutually exclusive/);
+  });
+
+  it("validates object-shaped JavaScript options", () => {
+    expect(
+      () =>
+        new AlternatorDynamoDBClient({
+          seeds: ["localhost"],
+          headerOptimization: "" as never,
+        }),
+    ).toThrow(/headerOptimization/);
+
+    expect(
+      () =>
+        new AlternatorDynamoDBClient({
+          seeds: ["localhost"],
+          headerOptimization: {
+            allowedHeaders: "Host",
+          } as never,
+        }),
+    ).toThrow(/allowedHeaders/);
+
+    expect(
+      () =>
+        new AlternatorDynamoDBClient({
+          seeds: ["localhost"],
+          discovery: "bad" as never,
+        }),
+    ).toThrow(/discovery/);
+
+    expect(
+      () =>
+        new AlternatorDynamoDBClient({
+          seeds: ["localhost"],
+          connection: "bad" as never,
+        }),
+    ).toThrow(/connection/);
   });
 
   it("rejects direct Node agent overrides in connection.node", () => {

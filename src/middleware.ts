@@ -1,15 +1,13 @@
 import { HttpRequest } from "@smithy/protocol-http";
 import type { FinalizeRequestMiddleware, HandlerExecutionContext } from "@smithy/types";
-import {
-  applyResponseEncodingHeaders,
-  compressBody,
-} from "./compression.js";
+import { applyResponseEncodingHeaders } from "./compression-shared.js";
 import { hostForUrl } from "./config.js";
 import type { AlternatorDiscovery } from "./discovery.js";
 import type { KeyRouteAffinityPlanner } from "./affinity.js";
 import type { AlternatorQueryPlan } from "./query-plan.js";
 import type { AlternatorNode, NormalizedAlternatorConfig } from "./types.js";
 import { applyUserAgent } from "./user-agent.js";
+import type { AlternatorBodyCompressor } from "./compression-types.js";
 
 const queryPlanKey = "__alternatorQueryPlan";
 
@@ -17,12 +15,14 @@ export interface AlternatorMiddlewareOptions {
   discovery: AlternatorDiscovery;
   config: NormalizedAlternatorConfig;
   keyAffinity: KeyRouteAffinityPlanner;
+  compressBody: AlternatorBodyCompressor;
 }
 
 export function createAlternatorRequestMiddleware<Input extends object, Output extends object>({
   discovery,
   config,
   keyAffinity,
+  compressBody,
 }: AlternatorMiddlewareOptions): FinalizeRequestMiddleware<Input, Output> {
   return (next, context) => async (args) => {
     if (!HttpRequest.isInstance(args.request)) {
@@ -50,7 +50,7 @@ export function createAlternatorRequestMiddleware<Input extends object, Output e
     }
 
     if (config.compression.request.enabled) {
-      request = await maybeCompressRequest(request, config);
+      request = await maybeCompressRequest(request, config, compressBody);
     }
 
     if (config.headerOptimization.enabled) {
@@ -173,6 +173,7 @@ function removeHeaders(
 async function maybeCompressRequest(
   request: HttpRequest,
   config: NormalizedAlternatorConfig,
+  compressBody: AlternatorBodyCompressor,
 ): Promise<HttpRequest> {
   if (request.headers["content-encoding"] || request.headers["Content-Encoding"]) {
     return request;
@@ -183,7 +184,7 @@ async function maybeCompressRequest(
     return request;
   }
 
-  const compressedBody = await compressBody(request.body, config.runtime, config.compression.request);
+  const compressedBody = await compressBody(request.body, config.compression.request);
   if (!compressedBody) {
     return request;
   }

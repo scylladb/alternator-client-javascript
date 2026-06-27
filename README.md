@@ -18,6 +18,22 @@ npm install @scylladb/alternator-client @aws-sdk/client-dynamodb
 
 For document commands, also install `@aws-sdk/lib-dynamodb`.
 
+Node.js 20 or newer is required for the Node runtime.
+
+The package uses conditional exports. Node resolves the Node build; browser,
+worker, and default ESM conditions resolve the Edge build, which contains no
+Node built-in imports. To force the Edge entrypoint in a non-edge test harness:
+
+```ts
+import { AlternatorDynamoDBClient } from "@scylladb/alternator-client/edge";
+```
+
+For document commands in an Edge bundle, use:
+
+```ts
+import { AlternatorDynamoDBDocumentClient } from "@scylladb/alternator-client/document/edge";
+```
+
 ## Low-Level Client
 
 ```ts
@@ -145,7 +161,6 @@ new AlternatorDynamoDBClient({
   scheme: "http",
   port: 8080,
   routing: routing.cluster(),
-  runtime: "node",
   logger: console,
 
   discovery: {

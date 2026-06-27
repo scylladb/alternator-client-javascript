@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { AlternatorDynamoDBClient, routing } from "../src/index.js";
+import { AlternatorDynamoDBClient as EdgeAlternatorDynamoDBClient } from "../src/edge.js";
 import { RecordingHandler } from "./helpers.js";
 import { ListTablesCommand } from "@aws-sdk/client-dynamodb";
 
@@ -257,7 +258,7 @@ describe("Alternator discovery", () => {
       }
       return { TableNames: [] };
     });
-    const client = new AlternatorDynamoDBClient({
+    const client = new EdgeAlternatorDynamoDBClient({
       seeds: ["seed"],
       runtime: "edge",
       requestHandler: handler,

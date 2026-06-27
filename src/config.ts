@@ -13,6 +13,7 @@ import type {
   AlternatorRuntime,
   NormalizedAlternatorConfig,
   NormalizedCompressionOptions,
+  NormalizedDiscoveryOptions,
   NormalizedRequestCompressionOptions,
   NormalizedResponseCompressionOptions,
 } from "./types.js";
@@ -31,7 +32,6 @@ const DEFAULT_RESPONSE_COMPRESSION_ALGORITHMS = [
 export const DEFAULT_REGION = "us-east-1";
 export const DEFAULT_SCHEME = "http";
 export const DEFAULT_PORT = 8080;
-export const HTTPS_ALTERNATOR_PORT = 8043;
 
 export const NO_AUTH_CREDENTIALS = {
   accessKeyId: "alternator",
@@ -236,8 +236,14 @@ function normalizeRequestCompression(
   }
   assertAllowedKeys(input, ["thresholdBytes", "gzipLevel", "compressor"], "compression.request");
   const options = input as Exclude<AlternatorRequestCompressionConfig, false>;
+  if (options.thresholdBytes !== undefined) {
+    assertNonNegative(options.thresholdBytes, "compression.request.thresholdBytes");
+  }
+  if (options.compressor !== undefined && typeof options.compressor !== "function") {
+    throw new TypeError("compression.request.compressor must be a function");
+  }
   const gzipLevel = options.gzipLevel;
-  if (gzipLevel !== undefined && (gzipLevel < -1 || gzipLevel > 9)) {
+  if (gzipLevel !== undefined && (!Number.isInteger(gzipLevel) || gzipLevel < -1 || gzipLevel > 9)) {
     throw new TypeError("compression.request.gzipLevel must be between -1 and 9");
   }
   return {
@@ -303,15 +309,34 @@ function normalizeHeaderOptimization(input: AlternatorDynamoDBClientConfig["head
       allowedHeaders: defaultAllowedHeaders(noAuth),
     };
   }
-  assertAllowedKeys(input as Record<string, unknown>, ["allowedHeaders", "additionalAllowedHeaders"], "headerOptimization");
-  const baseHeaders = input.allowedHeaders ?? defaultAllowedHeaders(noAuth);
+  if (!isRecord(input)) {
+    throw new TypeError("headerOptimization must be a boolean or options object");
+  }
+  assertAllowedKeys(input, ["allowedHeaders", "additionalAllowedHeaders"], "headerOptimization");
+  const baseHeaders = input.allowedHeaders === undefined
+    ? defaultAllowedHeaders(noAuth)
+    : normalizeHeaderList(input.allowedHeaders, "headerOptimization.allowedHeaders");
+  const additionalHeaders = input.additionalAllowedHeaders === undefined
+    ? []
+    : normalizeHeaderList(input.additionalAllowedHeaders, "headerOptimization.additionalAllowedHeaders");
   return {
     enabled: true,
     allowedHeaders: [
       ...baseHeaders,
-      ...(input.additionalAllowedHeaders ?? []),
+      ...additionalHeaders,
     ],
   };
+}
+
+function normalizeHeaderList(value: unknown, label: string): string[] {
+  if (!isNonEmptyStringArray(value)) {
+    throw new TypeError(`${label} must be an array of non-empty strings`);
+  }
+  return [...value];
+}
+
+function isNonEmptyStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((header) => typeof header === "string" && header.trim() !== "");
 }
 
 function normalizeKeyRouteAffinity(input: AlternatorDynamoDBClientConfig["keyRouteAffinity"]) {
@@ -385,17 +410,28 @@ function normalizeKeyRouteAffinityMode(mode: unknown): AlternatorKeyRouteAffinit
 function normalizeDiscovery(
   input: AlternatorDynamoDBClientConfig["discovery"],
   runtime: AlternatorRuntime,
-) {
-  const refreshIntervalMs = input?.refreshIntervalMs ?? 60_000;
-  const requestRefreshIntervalMs = input?.requestRefreshIntervalMs ?? 60_000;
-  const timeoutMs = input?.timeoutMs ?? 2_000;
+): NormalizedDiscoveryOptions {
+  const options = input as Record<string, unknown> | undefined;
+  if (input !== undefined) {
+    if (!isRecord(options)) {
+      throw new TypeError("discovery must be an options object");
+    }
+    assertAllowedKeys(options, ["background", "refreshIntervalMs", "requestRefreshIntervalMs", "timeoutMs"], "discovery");
+    if (options.background !== undefined && typeof options.background !== "boolean") {
+      throw new TypeError("discovery.background must be a boolean");
+    }
+  }
+
+  const refreshIntervalMs = numberOption(options?.refreshIntervalMs, 60_000, "discovery.refreshIntervalMs");
+  const requestRefreshIntervalMs = numberOption(options?.requestRefreshIntervalMs, 60_000, "discovery.requestRefreshIntervalMs");
+  const timeoutMs = numberOption(options?.timeoutMs, 2_000, "discovery.timeoutMs");
 
   assertNonNegative(refreshIntervalMs, "discovery.refreshIntervalMs");
   assertNonNegative(requestRefreshIntervalMs, "discovery.requestRefreshIntervalMs");
   assertNonNegative(timeoutMs, "discovery.timeoutMs");
 
   return {
-    background: input?.background ?? runtime === "node",
+    background: typeof options?.background === "boolean" ? options.background : runtime === "node",
     refreshIntervalMs,
     requestRefreshIntervalMs,
     timeoutMs,
@@ -403,22 +439,56 @@ function normalizeDiscovery(
 }
 
 function normalizeConnection(input: AlternatorConnectionOptions): AlternatorConnectionOptions {
-  if ("node" in input && input.node !== undefined && ("httpAgent" in input.node || "httpsAgent" in input.node)) {
+  if (!isRecord(input)) {
+    throw new TypeError("connection must be an options object");
+  }
+  const options = input;
+  assertAllowedKeys(options, ["keepAlive", "maxSockets", "timeouts", "throwOnRequestTimeout", "node", "fetch"], "connection");
+  if (options.keepAlive !== undefined && typeof options.keepAlive !== "boolean") {
+    throw new TypeError("connection.keepAlive must be a boolean");
+  }
+  if (options.throwOnRequestTimeout !== undefined && typeof options.throwOnRequestTimeout !== "boolean") {
+    throw new TypeError("connection.throwOnRequestTimeout must be a boolean");
+  }
+  if (options.timeouts !== undefined) {
+    if (!isRecord(options.timeouts)) {
+      throw new TypeError("connection.timeouts must be an options object");
+    }
+    assertAllowedKeys(options.timeouts, ["connectMs", "requestMs", "socketMs"], "connection.timeouts");
+  }
+  if (options.node !== undefined && !isRecord(options.node)) {
+    throw new TypeError("connection.node must be an options object");
+  }
+  if (options.fetch !== undefined && !isRecord(options.fetch)) {
+    throw new TypeError("connection.fetch must be an options object");
+  }
+  if (isRecord(options.node) && ("httpAgent" in options.node || "httpsAgent" in options.node)) {
     throw new TypeError("connection.node cannot include httpAgent or httpsAgent; use Alternator connection and tls options");
   }
-  if ("maxSockets" in input && input.maxSockets !== undefined) {
-    assertPositive(input.maxSockets, "connection.maxSockets");
+  if (options.maxSockets !== undefined) {
+    assertPositive(numberOption(options.maxSockets, undefined, "connection.maxSockets"), "connection.maxSockets");
   }
-  if (input.timeouts && "connectMs" in input.timeouts && input.timeouts.connectMs !== undefined) {
-    assertNonNegative(input.timeouts.connectMs, "connection.timeouts.connectMs");
+  const timeouts = isRecord(options.timeouts) ? options.timeouts : undefined;
+  if (timeouts?.connectMs !== undefined) {
+    assertNonNegative(numberOption(timeouts.connectMs, undefined, "connection.timeouts.connectMs"), "connection.timeouts.connectMs");
   }
-  if (input.timeouts?.requestMs !== undefined) {
-    assertNonNegative(input.timeouts.requestMs, "connection.timeouts.requestMs");
+  if (timeouts?.requestMs !== undefined) {
+    assertNonNegative(numberOption(timeouts.requestMs, undefined, "connection.timeouts.requestMs"), "connection.timeouts.requestMs");
   }
-  if (input.timeouts && "socketMs" in input.timeouts && input.timeouts.socketMs !== undefined) {
-    assertNonNegative(input.timeouts.socketMs, "connection.timeouts.socketMs");
+  if (timeouts?.socketMs !== undefined) {
+    assertNonNegative(numberOption(timeouts.socketMs, undefined, "connection.timeouts.socketMs"), "connection.timeouts.socketMs");
   }
   return input;
+}
+
+function numberOption(value: unknown, fallback: number, label: string): number;
+function numberOption(value: unknown, fallback: undefined, label: string): number;
+function numberOption(value: unknown, fallback: number | undefined, label: string): number {
+  const normalized = value === undefined ? fallback : value;
+  if (typeof normalized !== "number") {
+    throw new TypeError(`${label} must be a number`);
+  }
+  return normalized;
 }
 
 function assertPositive(value: number, label: string): void {
