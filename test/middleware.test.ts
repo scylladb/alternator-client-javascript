@@ -113,7 +113,7 @@ describe("Alternator middleware", () => {
     expect(request?.headers.authorization).toContain("Credential=key/");
   });
 
-  it("uses the Go-compatible optimized header whitelist with credentials", async () => {
+  it("uses the default optimized header whitelist with credentials", async () => {
     const handler = new RecordingHandler(() => ({ TableNames: [] }));
     const client = new AlternatorDynamoDBClient({
       seeds: ["seed"],
@@ -146,6 +146,29 @@ describe("Alternator middleware", () => {
       "x-amz-date",
       "x-amz-target",
     ]);
+  });
+
+  it("uses the default optimized header whitelist with session credentials", async () => {
+    const handler = new RecordingHandler(() => ({ TableNames: [] }));
+    const client = new AlternatorDynamoDBClient({
+      seeds: ["seed"],
+      requestHandler: handler,
+      discovery: { background: false },
+      credentials: {
+        accessKeyId: "key",
+        secretAccessKey: "secret",
+        sessionToken: "session-token",
+      },
+      headerOptimization: true,
+    });
+
+    await client.send(new ListTablesCommand({}));
+
+    const headers = commandRequests(handler)[0]?.headers ?? {};
+    expect(headers.authorization).toContain("AWS4-HMAC-SHA256");
+    expect(headers["x-amz-date"]).toBeDefined();
+    expect(headers["x-amz-target"]).toBe("DynamoDB_20120810.ListTables");
+    expect(headers["x-amz-security-token"]).toBeUndefined();
   });
 
   it("compresses JSON request bodies when enabled", async () => {
