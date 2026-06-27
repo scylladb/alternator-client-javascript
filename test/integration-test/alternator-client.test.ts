@@ -1,12 +1,20 @@
-import { ListTablesCommand, PutItemCommand } from "@aws-sdk/client-dynamodb";
+import { GetItemCommand, ListTablesCommand, PutItemCommand } from "@aws-sdk/client-dynamodb";
 import { describe, expect, it } from "vitest";
-import { routing } from "../../src/index.js";
+import {
+  ResponseCompressionDeflate,
+  ResponseCompressionGzip,
+  routing,
+} from "../../src/index.js";
 import { describeIntegration, integrationConfig, integrationEndpoints } from "./config.js";
 import {
   buildClient,
   captureCommandRequests,
   commandHeaders,
+  createStringHashTable,
   largePayload,
+  putStringItem,
+  safeDeleteTable,
+  uniqueTableName,
 } from "./helpers.js";
 
 describeIntegration.each(integrationEndpoints())(
@@ -160,6 +168,45 @@ describeIntegration.each(integrationEndpoints())(
         expect(commandHeaders(captured, "PutItemCommand")["content-encoding"]).toBe("gzip");
         expect(commandHeaders(captured, "ListTablesCommand")["content-encoding"]).toBeUndefined();
       } finally {
+        client.destroy();
+      }
+    });
+
+    it.each([
+      [ResponseCompressionGzip],
+      [ResponseCompressionDeflate],
+    ])("reads %s-compressed responses", async (encoding) => {
+      const tableName = uniqueTableName(`js_response_compression_${encoding}`);
+      const client = buildClient(endpoint, {
+        responseCompression: {
+          enabled: true,
+          encodings: [encoding],
+        },
+        maxAttempts: 1,
+      });
+      const captured = captureCommandRequests(client);
+
+      try {
+        await safeDeleteTable(client, tableName);
+        await createStringHashTable(client, tableName);
+        await putStringItem(client, tableName, "123", {
+          data: { S: largePayload().repeat(20) },
+        });
+
+        const response = await client.send(
+          new GetItemCommand({
+            TableName: tableName,
+            Key: {
+              pk: { S: "123" },
+            },
+            ConsistentRead: true,
+          }),
+        );
+
+        expect(response.Item?.data?.S).toContain("This is a test value");
+        expect(commandHeaders(captured, "GetItemCommand")["accept-encoding"]).toBe(encoding);
+      } finally {
+        await safeDeleteTable(client, tableName);
         client.destroy();
       }
     });

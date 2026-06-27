@@ -118,6 +118,7 @@ function buildDynamoConfig(
     routing: _routing,
     runtime: _runtime,
     compression: _compression,
+    responseCompression: _responseCompression,
     headerOptimization: _headerOptimization,
     userAgent: _userAgent,
     keyRouteAffinity: _keyRouteAffinity,

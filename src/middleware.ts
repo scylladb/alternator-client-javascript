@@ -1,6 +1,9 @@
 import { HttpRequest } from "@smithy/protocol-http";
 import type { FinalizeRequestMiddleware, HandlerExecutionContext } from "@smithy/types";
-import { compressBody } from "./compression.js";
+import {
+  applyResponseCompressionRequestHeaders,
+  compressBody,
+} from "./compression.js";
 import { hostForUrl } from "./config.js";
 import type { AlternatorDiscovery } from "./discovery.js";
 import type { KeyRouteAffinityPlanner } from "./affinity.js";
@@ -71,6 +74,13 @@ export function createAlternatorPostSigningMiddleware<Input extends object, Outp
     }
 
     const request = HttpRequest.clone(args.request);
+
+    if (config.responseCompression.enabled) {
+      request.headers = applyResponseCompressionRequestHeaders(
+        request.headers,
+        config.responseCompression.encodings,
+      );
+    }
 
     if (config.headerOptimization.enabled) {
       request.headers = whitelistHeaders(request.headers, config.headerOptimization.allowedHeaders);

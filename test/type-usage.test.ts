@@ -5,7 +5,12 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import { PutCommand } from "@aws-sdk/lib-dynamodb";
 import { describe, expectTypeOf, it } from "vitest";
-import { AlternatorDynamoDBClient, routing } from "../src/index.js";
+import {
+  AlternatorDynamoDBClient,
+  ResponseCompressionDeflate,
+  ResponseCompressionGzip,
+  routing,
+} from "../src/index.js";
 import { AlternatorDynamoDBDocumentClient } from "../src/document.js";
 import { RecordingHandler } from "./helpers.js";
 
@@ -26,6 +31,10 @@ describe("public type usage", () => {
       compression: {
         enabled: true,
         gzipLevel: -1,
+      },
+      responseCompression: {
+        enabled: true,
+        encodings: [ResponseCompressionGzip, ResponseCompressionDeflate],
       },
       userAgent: (userAgent) => `${userAgent} app/1.0.0`,
       keyRouteAffinity: {

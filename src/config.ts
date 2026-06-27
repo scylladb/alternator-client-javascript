@@ -2,12 +2,15 @@ import { routing } from "./routing.js";
 import { normalizeLogger } from "./logger.js";
 import { normalizeUserAgent } from "./user-agent.js";
 import type { RoutingRule } from "./routing.js";
+import { ResponseCompressionDeflate, ResponseCompressionGzip } from "./types.js";
 import type {
   AlternatorConnectionOptions,
   AlternatorDynamoDBClientConfig,
   AlternatorKeyRouteAffinityType,
+  AlternatorResponseCompression,
   AlternatorRuntime,
   NormalizedAlternatorConfig,
+  NormalizedResponseCompressionOptions,
 } from "./types.js";
 
 const DEFAULT_ALLOWED_HEADERS = [
@@ -16,6 +19,10 @@ const DEFAULT_ALLOWED_HEADERS = [
   "Content-Length",
   "Accept-Encoding",
   "Content-Encoding",
+] as const;
+const DEFAULT_RESPONSE_COMPRESSION_ENCODINGS = [
+  ResponseCompressionGzip,
+  ResponseCompressionDeflate,
 ] as const;
 
 export const DEFAULT_REGION = "us-east-1";
@@ -48,6 +55,7 @@ export function normalizeConfig(input: AlternatorDynamoDBClientConfig): Normaliz
   const noAuth = input.credentials === undefined;
   const routingRule = normalizeRouting(input.routing);
   const compression = normalizeCompression(input.compression);
+  const responseCompression = normalizeResponseCompression(input.responseCompression);
   const headerOptimization = normalizeHeaderOptimization(input.headerOptimization, noAuth);
   const userAgent = normalizeUserAgent(input.userAgent);
   const keyRouteAffinity = normalizeKeyRouteAffinity(input.keyRouteAffinity);
@@ -61,6 +69,7 @@ export function normalizeConfig(input: AlternatorDynamoDBClientConfig): Normaliz
     routing: routingRule,
     runtime,
     compression,
+    responseCompression,
     headerOptimization,
     userAgent,
     keyRouteAffinity,
@@ -202,6 +211,56 @@ function normalizeCompression(input: AlternatorDynamoDBClientConfig["compression
     throw new TypeError("compression.gzipLevel must be between -1 and 9");
   }
   return normalized;
+}
+
+function normalizeResponseCompression(
+  input: AlternatorDynamoDBClientConfig["responseCompression"],
+): NormalizedResponseCompressionOptions {
+  if (input === undefined || input === false) {
+    return { enabled: false, encodings: [] };
+  }
+
+  const encodings = responseCompressionEncodings(input)
+    .map(normalizeResponseCompressionEncoding)
+    .filter((encoding, index, values) => values.indexOf(encoding) === index);
+
+  return {
+    enabled: encodings.length > 0,
+    encodings,
+  };
+}
+
+function responseCompressionEncodings(
+  input: NonNullable<AlternatorDynamoDBClientConfig["responseCompression"]>,
+): readonly unknown[] {
+  if (input === true) {
+    return DEFAULT_RESPONSE_COMPRESSION_ENCODINGS;
+  }
+  if (!isRecord(input)) {
+    throw new TypeError("responseCompression must be a boolean or options object");
+  }
+  if (input.enabled === false) {
+    return [];
+  }
+  if (input.encodings !== undefined) {
+    if (!Array.isArray(input.encodings)) {
+      throw new TypeError("responseCompression.encodings must be an array");
+    }
+  }
+  if (input.enabled !== true) {
+    return [];
+  }
+  return input.encodings ?? DEFAULT_RESPONSE_COMPRESSION_ENCODINGS;
+}
+
+function normalizeResponseCompressionEncoding(encoding: unknown): AlternatorResponseCompression {
+  switch (encoding) {
+    case ResponseCompressionGzip:
+    case ResponseCompressionDeflate:
+      return encoding;
+    default:
+      throw new TypeError('responseCompression encodings must be "gzip" or "deflate"');
+  }
 }
 
 function normalizeHeaderOptimization(input: AlternatorDynamoDBClientConfig["headerOptimization"], noAuth: boolean) {

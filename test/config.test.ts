@@ -1,6 +1,10 @@
 import { ListTablesCommand } from "@aws-sdk/client-dynamodb";
 import { describe, expect, it } from "vitest";
-import { AlternatorDynamoDBClient } from "../src/index.js";
+import {
+  AlternatorDynamoDBClient,
+  ResponseCompressionDeflate,
+  ResponseCompressionGzip,
+} from "../src/index.js";
 import { RecordingHandler } from "./helpers.js";
 
 describe("AlternatorDynamoDBClient config", () => {
@@ -188,6 +192,62 @@ describe("AlternatorDynamoDBClient config", () => {
         },
       }).alternatorConfig.compression.gzipLevel,
     ).toBe(-1);
+  });
+
+  it("normalizes and validates response compression encodings", () => {
+    expect(
+      new AlternatorDynamoDBClient({
+        seeds: ["localhost"],
+        responseCompression: true,
+      }).alternatorConfig.responseCompression,
+    ).toEqual({
+      enabled: true,
+      encodings: [ResponseCompressionGzip, ResponseCompressionDeflate],
+    });
+
+    expect(
+      new AlternatorDynamoDBClient({
+        seeds: ["localhost"],
+        responseCompression: {
+          enabled: true,
+          encodings: [
+            ResponseCompressionDeflate,
+            ResponseCompressionDeflate,
+            ResponseCompressionGzip,
+          ],
+        },
+      }).alternatorConfig.responseCompression,
+    ).toEqual({
+      enabled: true,
+      encodings: [ResponseCompressionDeflate, ResponseCompressionGzip],
+    });
+
+    expect(
+      new AlternatorDynamoDBClient({
+        seeds: ["localhost"],
+        responseCompression: false,
+      }).alternatorConfig.responseCompression.enabled,
+    ).toBe(false);
+
+    expect(
+      new AlternatorDynamoDBClient({
+        seeds: ["localhost"],
+        responseCompression: {
+          encodings: [ResponseCompressionGzip],
+        },
+      }).alternatorConfig.responseCompression.enabled,
+    ).toBe(false);
+
+    expect(
+      () =>
+        new AlternatorDynamoDBClient({
+          seeds: ["localhost"],
+          responseCompression: {
+            enabled: true,
+            encodings: ["br"],
+          } as never,
+        }),
+    ).toThrow(/responseCompression/);
   });
 
   it("validates key route affinity type", () => {
