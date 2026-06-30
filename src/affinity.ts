@@ -119,12 +119,12 @@ export class KeyRouteAffinityPlanner {
       });
     }
 
-    const preferred = selectPreferredNode(votes);
-    if (!preferred) {
+    const preferredNodes = selectPreferredNodes(votes);
+    if (preferredNodes.length === 0) {
       return undefined;
     }
 
-    return new AlternatorQueryPlan(nodes, [], preferred, true);
+    return new AlternatorQueryPlan(nodes, [], preferredNodes, true);
   }
 
   private triggerPartitionKeyDiscovery(tableName: string): void {
@@ -286,10 +286,15 @@ function batchWriteRoutingCandidates(
       if (!isRecord(write)) {
         continue;
       }
-      if (isRecord(write.PutRequest) && isRecord(write.PutRequest.Item)) {
+      const hasPutRequest = "PutRequest" in write;
+      const hasDeleteRequest = "DeleteRequest" in write;
+      if (hasPutRequest === hasDeleteRequest) {
+        continue;
+      }
+      if (hasPutRequest && isRecord(write.PutRequest) && isRecord(write.PutRequest.Item)) {
         candidates.push({ tableName, values: write.PutRequest.Item });
       }
-      if (isRecord(write.DeleteRequest) && isRecord(write.DeleteRequest.Key)) {
+      if (hasDeleteRequest && isRecord(write.DeleteRequest) && isRecord(write.DeleteRequest.Key)) {
         candidates.push({ tableName, values: write.DeleteRequest.Key });
       }
     }
@@ -298,24 +303,14 @@ function batchWriteRoutingCandidates(
   return candidates;
 }
 
-function selectPreferredNode(votes: Map<string, { node: AlternatorNode; votes: number }>): AlternatorNode | undefined {
-  let preferred: AlternatorNode | undefined;
-  let preferredVotes = 0;
-  let tied = false;
-
-  for (const vote of votes.values()) {
-    if (vote.votes > preferredVotes) {
-      preferred = vote.node;
-      preferredVotes = vote.votes;
-      tied = false;
-      continue;
-    }
-    if (vote.votes === preferredVotes) {
-      tied = true;
-    }
-  }
-
-  return preferredVotes > 0 && !tied ? preferred : undefined;
+function selectPreferredNodes(votes: Map<string, { node: AlternatorNode; votes: number }>): AlternatorNode[] {
+  return [...votes.values()]
+    .filter((vote) => vote.votes > 0)
+    .sort((left, right) => {
+      const voteOrder = right.votes - left.votes;
+      return voteOrder === 0 ? left.node.url.localeCompare(right.node.url) : voteOrder;
+    })
+    .map((vote) => vote.node);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

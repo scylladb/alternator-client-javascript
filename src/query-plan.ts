@@ -4,17 +4,19 @@ import { SeededRandom } from "./seeded-random.js";
 export class AlternatorQueryPlan {
   private activeNodes: AlternatorNode[];
   private quarantinedNodes: AlternatorNode[];
+  private readonly preferredNodes: AlternatorNode[];
   private readonly random: SeededRandom | undefined;
 
   constructor(
     activeNodes: readonly AlternatorNode[],
     quarantinedNodes: readonly AlternatorNode[] = [],
-    private readonly preferredNode?: AlternatorNode,
+    preferredNodes?: AlternatorNode | readonly AlternatorNode[],
     private readonly deterministicOrder = false,
     random?: SeededRandom,
     sortBeforeSelection = deterministicOrder || random !== undefined,
   ) {
     this.random = random;
+    this.preferredNodes = normalizePreferredNodes(preferredNodes);
     this.activeNodes = sortBeforeSelection
       ? sortNodes(activeNodes)
       : [...activeNodes];
@@ -32,8 +34,12 @@ export class AlternatorQueryPlan {
   }
 
   next(): AlternatorNode | undefined {
-    if (this.preferredNode) {
-      const preferred = popNode(this.activeNodes, this.preferredNode);
+    while (this.preferredNodes.length > 0) {
+      const preferredNode = this.preferredNodes.shift();
+      if (!preferredNode) {
+        continue;
+      }
+      const preferred = popNode(this.activeNodes, preferredNode);
       if (preferred) {
         return preferred;
       }
@@ -89,4 +95,22 @@ function popNode(nodes: AlternatorNode[], preferredNode: AlternatorNode): Altern
   }
   const [node] = nodes.splice(index, 1);
   return node;
+}
+
+function normalizePreferredNodes(
+  preferredNodes: AlternatorNode | readonly AlternatorNode[] | undefined,
+): AlternatorNode[] {
+  if (!preferredNodes) {
+    return [];
+  }
+  if (isNodeList(preferredNodes)) {
+    return [...preferredNodes];
+  }
+  return [preferredNodes];
+}
+
+function isNodeList(
+  preferredNodes: AlternatorNode | readonly AlternatorNode[],
+): preferredNodes is readonly AlternatorNode[] {
+  return Array.isArray(preferredNodes);
 }
