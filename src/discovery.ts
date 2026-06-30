@@ -250,6 +250,7 @@ export class AlternatorDiscovery {
     });
 
     if (response.response.statusCode < 200 || response.response.statusCode >= 300) {
+      await drainResponseBody(response.response.body);
       throw new Error(`/localnodes returned HTTP ${response.response.statusCode}`);
     }
 
@@ -268,6 +269,14 @@ export class AlternatorDiscovery {
       port: this.config.port,
       url: nodeUrl(host, this.config),
     };
+  }
+}
+
+async function drainResponseBody(body: unknown): Promise<void> {
+  try {
+    await bodyToString(body);
+  } catch (_error) {
+    return;
   }
 }
 
