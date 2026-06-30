@@ -3,6 +3,8 @@ import { AlternatorDynamoDBClient, routing } from "../src/index.js";
 import { AlternatorDynamoDBClient as EdgeAlternatorDynamoDBClient } from "../src/edge.js";
 import { RecordingHandler } from "./helpers.js";
 import { ListTablesCommand } from "@aws-sdk/client-dynamodb";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 
 const missingDatacenterQuery = { dc: "__alternator_client_missing_dc__" };
 const missingRackQuery = { rack: "__alternator_client_missing_rack__" };
@@ -274,4 +276,123 @@ describe("Alternator discovery", () => {
     expect(handler.requests[1]?.hostname).toBe("edge-node");
     expect(handler.requests[1]?.headers.connection).toBeUndefined();
   });
+
+  it("keeps the discovery socket reusable after non-2xx responses", async () => {
+    let requests = 0;
+    let connections = 0;
+    const server = createServer((request, response) => {
+      expect(request.url).toBe("/localnodes");
+      requests += 1;
+      response.setHeader("content-type", "application/json");
+      if (requests === 1) {
+        response.statusCode = 500;
+        response.end(JSON.stringify({ error: "temporary failure" }));
+        return;
+      }
+      response.end(JSON.stringify(["node-a.internal"]));
+    });
+    server.on("connection", () => {
+      connections += 1;
+    });
+    const address = await listen(server);
+    const client = new AlternatorDynamoDBClient({
+      seeds: [address.address],
+      port: address.port,
+      discovery: {
+        background: false,
+        timeoutMs: 500,
+      },
+      connection: {
+        keepAlive: true,
+        maxSockets: 1,
+      },
+    });
+
+    try {
+      await client.alternator.refreshNodes();
+      await expect(client.alternator.refreshNodes()).resolves.toEqual([
+        {
+          host: "node-a.internal",
+          scheme: "http",
+          port: address.port,
+          url: `http://node-a.internal:${address.port}`,
+        },
+      ]);
+      expect(connections).toBe(1);
+    } finally {
+      client.destroy();
+      await close(server);
+    }
+  });
+
+  it("keeps the DynamoDB socket reusable after repeated non-2xx responses", async () => {
+    let requests = 0;
+    let connections = 0;
+    const server = createServer((request, response) => {
+      expect(request.method).toBe("POST");
+      expect(request.url).toBe("/");
+      request.resume();
+      request.on("end", () => {
+        requests += 1;
+        response.setHeader("content-type", "application/x-amz-json-1.0");
+        if (requests < 3) {
+          response.statusCode = 400;
+          response.end(JSON.stringify({ __type: "ValidationException", message: "bad" }));
+          return;
+        }
+        response.end(JSON.stringify({ TableNames: [] }));
+      });
+    });
+    server.on("connection", () => {
+      connections += 1;
+    });
+    const address = await listen(server);
+    const client = new AlternatorDynamoDBClient({
+      seeds: [address.address],
+      port: address.port,
+      discovery: {
+        background: false,
+      },
+      connection: {
+        keepAlive: true,
+        maxSockets: 1,
+      },
+      maxAttempts: 1,
+    });
+
+    try {
+      await expect(client.send(new ListTablesCommand({}))).rejects.toThrow(/bad/);
+      await expect(client.send(new ListTablesCommand({}))).rejects.toThrow(/bad/);
+      await expect(client.send(new ListTablesCommand({}))).resolves.toMatchObject({
+        TableNames: [],
+      });
+      expect(requests).toBe(3);
+      expect(connections).toBe(1);
+    } finally {
+      client.destroy();
+      await close(server);
+    }
+  });
 });
+
+function listen(server: Server): Promise<AddressInfo> {
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", reject);
+      resolve(server.address() as AddressInfo);
+    });
+  });
+}
+
+function close(server: Server): Promise<void> {
+  return new Promise((resolve, reject) => {
+    server.close((error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
+    });
+  });
+}
