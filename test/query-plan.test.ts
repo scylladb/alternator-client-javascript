@@ -30,6 +30,18 @@ describe("AlternatorQueryPlan", () => {
     expect(plan.next()).toBeUndefined();
   });
 
+  it("tries preferred nodes in order, then remaining nodes in sorted order", () => {
+    const nodes = testNodes(["node-c", "node-a", "node-d", "node-b"]);
+    const preferred = [
+      nodes.find((node) => node.host === "node-d"),
+      nodes.find((node) => node.host === "node-b"),
+    ].filter((node): node is AlternatorNode => node !== undefined);
+    const plan = new AlternatorQueryPlan(nodes, [], preferred, true);
+
+    expect(takeHosts(plan, nodes.length)).toEqual(["node-d", "node-b", "node-a", "node-c"]);
+    expect(plan.next()).toBeUndefined();
+  });
+
   it("matches seeded raw query plan vectors", () => {
     const hosts = Array.from({ length: 10 }, (_, index) => `node${index + 1}.example.com:8043`);
 
