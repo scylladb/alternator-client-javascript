@@ -250,7 +250,7 @@ export class AlternatorDiscovery {
     });
 
     if (response.response.statusCode < 200 || response.response.statusCode >= 300) {
-      await drainResponseBody(response.response.body);
+      await drainResponseBody(response.response.body, this.config.discovery.timeoutMs);
       throw new Error(`/localnodes returned HTTP ${response.response.statusCode}`);
     }
 
@@ -272,11 +272,47 @@ export class AlternatorDiscovery {
   }
 }
 
-async function drainResponseBody(body: unknown): Promise<void> {
-  try {
-    await bodyToString(body);
-  } catch (_error) {
+async function drainResponseBody(body: unknown, timeoutMs: number): Promise<void> {
+  const drain = bodyToString(body).then(
+    () => undefined,
+    () => undefined,
+  );
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<void>((resolve) => {
+    timeout = setTimeout(() => {
+      destroyResponseBody(body);
+      resolve();
+    }, Math.max(1, timeoutMs));
+    timeout.unref?.();
+  });
+
+  await Promise.race([drain, timeoutPromise]);
+  if (timeout) {
+    clearTimeout(timeout);
+  }
+}
+
+function destroyResponseBody(body: unknown): void {
+  if (typeof body !== "object" || body === null) {
     return;
+  }
+
+  if ("destroy" in body && typeof (body as { destroy?: unknown }).destroy === "function") {
+    try {
+      (body as { destroy(): void }).destroy();
+    } catch (_error) {
+      return;
+    }
+    return;
+  }
+
+  if ("cancel" in body && typeof (body as { cancel?: unknown }).cancel === "function") {
+    try {
+      const cancellation = (body as { cancel(): unknown }).cancel();
+      void Promise.resolve(cancellation).catch(() => undefined);
+    } catch (_error) {
+      return;
+    }
   }
 }
 
