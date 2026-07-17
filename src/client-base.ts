@@ -6,7 +6,7 @@ import {
   type ServiceOutputTypes,
 } from "@aws-sdk/client-dynamodb";
 import type { HttpHandler, HttpHandlerUserInput } from "@smithy/protocol-http";
-import type { HttpHandlerOptions } from "@smithy/types";
+import type { AwsCredentialIdentity, HttpHandlerOptions } from "@smithy/types";
 import { DEFAULT_REGION, firstEndpointUrl, NO_AUTH_CREDENTIALS, normalizeConfig } from "./config.js";
 import { AlternatorDiscovery } from "./discovery.js";
 import { KeyRouteAffinityPlanner } from "./affinity.js";
@@ -137,13 +137,31 @@ function buildDynamoConfig(
     ...awsConfig,
     endpoint: firstEndpointUrl(alternatorConfig),
     region: region ?? DEFAULT_REGION,
-    credentials: credentials ?? NO_AUTH_CREDENTIALS,
+    credentials: dropSessionToken(credentials) ?? NO_AUTH_CREDENTIALS,
     requestHandler,
   };
   if (alternatorConfig.headerOptimization.enabled) {
     dynamoConfig.applyChecksum = false;
   }
   return dynamoConfig;
+}
+
+function dropSessionToken(
+  credentials: DynamoDBClientConfig["credentials"] | undefined,
+): DynamoDBClientConfig["credentials"] | undefined {
+  if (credentials === undefined) {
+    return undefined;
+  }
+  if (typeof credentials === "function") {
+    return async (identityProperties?: Record<string, unknown>) =>
+      removeSessionToken(await credentials(identityProperties));
+  }
+  return removeSessionToken(credentials);
+}
+
+function removeSessionToken(credentials: AwsCredentialIdentity): AwsCredentialIdentity {
+  const { sessionToken: _sessionToken, ...withoutSessionToken } = credentials;
+  return withoutSessionToken;
 }
 
 export type AlternatorRequestHandler = HttpHandler<HttpHandlerOptions>;

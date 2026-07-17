@@ -325,6 +325,50 @@ describe("Alternator discovery", () => {
     }
   });
 
+  it("bounds draining non-terminating non-2xx discovery bodies", async () => {
+    let requests = 0;
+    const server = createServer((request, response) => {
+      expect(request.url).toBe("/localnodes");
+      requests += 1;
+      response.setHeader("content-type", "application/json");
+      if (requests === 1) {
+        response.statusCode = 500;
+        response.write(JSON.stringify({ error: "temporary failure" }));
+        return;
+      }
+      response.end(JSON.stringify(["node-a.internal"]));
+    });
+    const address = await listen(server);
+    const client = new AlternatorDynamoDBClient({
+      seeds: [address.address, address.address],
+      port: address.port,
+      discovery: {
+        background: false,
+        timeoutMs: 20,
+      },
+      connection: {
+        keepAlive: true,
+        maxSockets: 1,
+      },
+    });
+
+    try {
+      await expect(client.alternator.refreshNodes()).resolves.toEqual([
+        {
+          host: "node-a.internal",
+          scheme: "http",
+          port: address.port,
+          url: `http://node-a.internal:${address.port}`,
+        },
+      ]);
+      expect(requests).toBe(2);
+    } finally {
+      client.destroy();
+      server.closeAllConnections?.();
+      await close(server);
+    }
+  });
+
   it("keeps the DynamoDB socket reusable after repeated non-2xx responses", async () => {
     let requests = 0;
     let connections = 0;

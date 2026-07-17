@@ -221,8 +221,10 @@ Header optimization is disabled by default. When enabled, headers are
 whitelisted, not removed by a strip list. The default
 whitelist is `Host`, `X-Amz-Target`, `Content-Length`, `Accept-Encoding`, and
 `Content-Encoding`; when credentials are configured, `Authorization` and
-`X-Amz-Date` are also kept. The Alternator `User-Agent` is applied after this
-filter, so it is kept unless `userAgent: false` is configured.
+`X-Amz-Date` are also kept. Alternator does not use AWS session tokens, so
+`sessionToken` is not sent even when provided in credentials. The Alternator
+`User-Agent` is applied after this filter, so it is kept unless
+`userAgent: false` is configured.
 
 By default, the client replaces the AWS SDK `User-Agent` with the ScyllaDB
 Alternator client identity:

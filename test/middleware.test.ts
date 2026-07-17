@@ -156,7 +156,7 @@ describe("Alternator middleware", () => {
     ]);
   });
 
-  it("uses the default optimized header whitelist with session credentials", async () => {
+  it("drops session tokens before signing Alternator requests", async () => {
     const handler = new RecordingHandler(() => ({ TableNames: [] }));
     const client = new AlternatorDynamoDBClient({
       seeds: ["seed"],
@@ -177,6 +177,33 @@ describe("Alternator middleware", () => {
     expect(headers["x-amz-date"]).toBeDefined();
     expect(headers["x-amz-target"]).toBe("DynamoDB_20120810.ListTables");
     expect(headers["x-amz-security-token"]).toBeUndefined();
+    expect(signedHeaderNames(headers.authorization)).toEqual([
+      "content-length",
+      "host",
+      "x-amz-date",
+      "x-amz-target",
+    ]);
+  });
+
+  it("drops session tokens from credential providers before signing Alternator requests", async () => {
+    const handler = new RecordingHandler(() => ({ TableNames: [] }));
+    const client = new AlternatorDynamoDBClient({
+      seeds: ["seed"],
+      requestHandler: handler,
+      discovery: { background: false },
+      credentials: () => Promise.resolve({
+        accessKeyId: "key",
+        secretAccessKey: "secret",
+        sessionToken: "session-token",
+      }),
+    });
+
+    await client.send(new ListTablesCommand({}));
+
+    const headers = commandRequests(handler)[0]?.headers ?? {};
+    expect(headers.authorization).toContain("AWS4-HMAC-SHA256");
+    expect(headers["x-amz-security-token"]).toBeUndefined();
+    expect(signedHeaderNames(headers.authorization)).not.toContain("x-amz-security-token");
   });
 
   it("compresses JSON request bodies when enabled", async () => {
