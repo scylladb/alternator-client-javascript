@@ -1,6 +1,8 @@
 import { GetItemCommand, ListTablesCommand, PutItemCommand } from "@aws-sdk/client-dynamodb";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import { describe, expect, it } from "vitest";
-import { routing } from "../../src/index.js";
+import { AlternatorDynamoDBClient, routing } from "../../src/index.js";
 import { describeIntegration, integrationConfig, integrationEndpoints } from "./config.js";
 import {
   buildClient,
@@ -351,6 +353,39 @@ describeIntegration.each(integrationEndpoints())(
   },
 );
 
+describeIntegration.each(integrationEndpoints().filter((endpoint) => endpoint.scheme === "http"))(
+  "Alternator DNS entrypoint integration ($name)",
+  (endpoint) => {
+    it("discovers live cluster nodes from a DNS entrypoint", async () => {
+      const localnodes = await fetch(`http://${endpoint.host}:${endpoint.port}/localnodes`);
+      expect(localnodes.ok).toBe(true);
+      const body = await localnodes.text();
+
+      const server = createServer((request, response) => {
+        expect(request.url).toBe("/localnodes");
+        response.setHeader("content-type", "application/json");
+        response.end(body);
+      });
+      const address = await listen(server, "localhost");
+      const client = new AlternatorDynamoDBClient({
+        seeds: ["localhost"],
+        scheme: "http",
+        port: address.port,
+        credentials: integrationConfig.credentials,
+        discovery: { background: false },
+      });
+
+      try {
+        const nodes = await client.alternator.refreshNodes();
+        expect(nodes.length).toBeGreaterThan(0);
+      } finally {
+        client.destroy();
+        await close(server);
+      }
+    });
+  },
+);
+
 describe("integration test opt-in", () => {
   it("is disabled unless INTEGRATION_TESTS is truthy", () => {
     expect(typeof integrationConfig.enabled).toBe("boolean");
@@ -366,4 +401,26 @@ function expectSignedHeadersPresent(headers: Record<string, string | undefined>)
 function signedHeaderNames(authorization: string | undefined): string[] {
   const match = authorization?.match(/(?:^|,\s*)SignedHeaders=([^,\s]+)/);
   return match?.[1]?.split(";").filter(Boolean) ?? [];
+}
+
+function listen(server: Server, host: string): Promise<AddressInfo> {
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, host, () => {
+      server.off("error", reject);
+      resolve(server.address() as AddressInfo);
+    });
+  });
+}
+
+function close(server: Server): Promise<void> {
+  return new Promise((resolve, reject) => {
+    server.close((error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
+    });
+  });
 }

@@ -325,6 +325,47 @@ describe("Alternator discovery", () => {
     }
   });
 
+  it("resolves DNS entrypoint and keeps DNS node records", async () => {
+    let hostHeader = "";
+    const server = createServer((request, response) => {
+      expect(request.url).toBe("/localnodes");
+      hostHeader = request.headers.host ?? "";
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify(["localhost", "node-a.internal"]));
+    });
+    const address = await listen(server, "localhost");
+    const client = new AlternatorDynamoDBClient({
+      seeds: ["localhost"],
+      port: address.port,
+      discovery: {
+        background: false,
+        timeoutMs: 500,
+      },
+    });
+
+    try {
+      await expect(client.alternator.refreshNodes()).resolves.toEqual([
+        {
+          host: "localhost",
+          scheme: "http",
+          port: address.port,
+          url: `http://localhost:${address.port}`,
+        },
+        {
+          host: "node-a.internal",
+          scheme: "http",
+          port: address.port,
+          url: `http://node-a.internal:${address.port}`,
+        },
+      ]);
+      expect(hostHeader).toBe(`localhost:${address.port}`);
+    } finally {
+      client.destroy();
+      server.closeAllConnections?.();
+      await close(server);
+    }
+  });
+
   it("bounds draining non-terminating non-2xx discovery bodies", async () => {
     let requests = 0;
     const server = createServer((request, response) => {
@@ -419,10 +460,10 @@ describe("Alternator discovery", () => {
   });
 });
 
-function listen(server: Server): Promise<AddressInfo> {
+function listen(server: Server, host = "127.0.0.1"): Promise<AddressInfo> {
   return new Promise((resolve, reject) => {
     server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
+    server.listen(0, host, () => {
       server.off("error", reject);
       resolve(server.address() as AddressInfo);
     });
