@@ -19,8 +19,10 @@ import { AlternatorDynamoDBClient, routing } from "../src/index.js";
 import { AlternatorDynamoDBClient as EdgeAlternatorDynamoDBClient } from "../src/edge.js";
 import { RecordingHandler } from "./helpers.js";
 import { ListTablesCommand } from "@aws-sdk/client-dynamodb";
-import { createServer, type Server } from "node:http";
-import type { AddressInfo } from "node:net";
+import { NodeHttpHandler } from "@smithy/node-http-handler";
+import { Agent, createServer, type Server } from "node:http";
+import type { LookupAddress } from "node:dns";
+import type { AddressInfo, LookupFunction } from "node:net";
 
 const missingDatacenterQuery = { dc: "__alternator_client_missing_dc__" };
 const missingRackQuery = { rack: "__alternator_client_missing_rack__" };
@@ -382,6 +384,143 @@ describe("Alternator discovery", () => {
     }
   });
 
+  it("discovers and routes through an IPv6 literal entrypoint", async () => {
+    const hostHeaders: string[] = [];
+    const server = createServer((request, response) => {
+      hostHeaders.push(request.headers.host ?? "");
+      response.setHeader("content-type", "application/x-amz-json-1.0");
+      response.end(JSON.stringify(request.url === "/localnodes" ? ["::1"] : { TableNames: [] }));
+    });
+    const address = await listen(server, "::1");
+    const client = new AlternatorDynamoDBClient({
+      seeds: [address.address],
+      port: address.port,
+      discovery: { background: false, timeoutMs: 500 },
+      maxAttempts: 1,
+    });
+
+    try {
+      await expect(client.alternator.refreshNodes()).resolves.toEqual([
+        {
+          host: "::1",
+          scheme: "http",
+          port: address.port,
+          url: `http://[::1]:${address.port}`,
+        },
+      ]);
+      await expect(client.send(new ListTablesCommand({}))).resolves.toMatchObject({
+        TableNames: [],
+      });
+      expect(hostHeaders).toEqual([
+        `[::1]:${address.port}`,
+        `[::1]:${address.port}`,
+      ]);
+    } finally {
+      client.destroy();
+      server.closeAllConnections?.();
+      await close(server);
+    }
+  });
+
+  it.each([
+    {
+      name: "an A-only",
+      listenHost: "127.0.0.1",
+      addresses: [
+        { address: "127.0.0.1", family: 4 },
+      ],
+    },
+    {
+      name: "an AAAA-only",
+      listenHost: "::1",
+      addresses: [
+        { address: "::1", family: 6 },
+      ],
+    },
+    {
+      name: "AAAA to A",
+      listenHost: "127.0.0.1",
+      addresses: [
+        { address: "::1", family: 6 },
+        { address: "127.0.0.1", family: 4 },
+      ],
+    },
+    {
+      name: "A to AAAA",
+      listenHost: "::1",
+      addresses: [
+        { address: "127.0.0.1", family: 4 },
+        { address: "::1", family: 6 },
+      ],
+    },
+  ])("falls back from $name DNS records for discovery and routing", async ({ listenHost, addresses }) => {
+    let requests = 0;
+    const server = createServer((request, response) => {
+      requests += 1;
+      response.setHeader("content-type", "application/x-amz-json-1.0");
+      response.end(JSON.stringify(request.url === "/localnodes" ? ["dual.test"] : { TableNames: [] }));
+    });
+    const address = await listen(server, listenHost);
+    const requestHandler = dualStackHandler(addresses);
+    const client = new AlternatorDynamoDBClient({
+      seeds: ["dual.test"],
+      port: address.port,
+      requestHandler,
+      discovery: { background: false, timeoutMs: 500 },
+      maxAttempts: 1,
+    });
+
+    try {
+      await expect(client.alternator.refreshNodes()).resolves.toEqual([
+        {
+          host: "dual.test",
+          scheme: "http",
+          port: address.port,
+          url: `http://dual.test:${address.port}`,
+        },
+      ]);
+      await expect(client.send(new ListTablesCommand({}))).resolves.toMatchObject({
+        TableNames: [],
+      });
+      expect(requests).toBe(2);
+    } finally {
+      client.destroy();
+      server.closeAllConnections?.();
+      await close(server);
+    }
+  });
+
+  it("returns promptly and keeps its seed when all DNS records are unavailable", async () => {
+    const server = createServer();
+    const address = await listen(server);
+    await close(server);
+    const client = new AlternatorDynamoDBClient({
+      seeds: ["dual.test"],
+      port: address.port,
+      requestHandler: dualStackHandler([
+        { address: "::1", family: 6 },
+        { address: "127.0.0.1", family: 4 },
+      ]),
+      discovery: { background: false, timeoutMs: 100 },
+      maxAttempts: 1,
+    });
+
+    try {
+      const startedAt = Date.now();
+      await expect(client.alternator.refreshNodes()).resolves.toEqual([
+        {
+          host: "dual.test",
+          scheme: "http",
+          port: address.port,
+          url: `http://dual.test:${address.port}`,
+        },
+      ]);
+      expect(Date.now() - startedAt).toBeLessThan(500);
+    } finally {
+      client.destroy();
+    }
+  });
+
   it("bounds draining non-terminating non-2xx discovery bodies", async () => {
     let requests = 0;
     const server = createServer((request, response) => {
@@ -495,5 +634,28 @@ function close(server: Server): Promise<void> {
       }
       resolve();
     });
+  });
+}
+
+function dualStackHandler(addresses: LookupAddress[]): NodeHttpHandler {
+  const lookup: LookupFunction = (_hostname, options, callback) => {
+    if (options.all) {
+      callback(null, addresses);
+      return;
+    }
+    const first = addresses[0];
+    if (!first) {
+      callback(new Error("no DNS records"), "", 0);
+      return;
+    }
+    callback(null, first.address, first.family);
+  };
+  return new NodeHttpHandler({
+    httpAgent: new Agent({
+      keepAlive: false,
+      lookup,
+      autoSelectFamily: true,
+      autoSelectFamilyAttemptTimeout: 10,
+    }),
   });
 }
