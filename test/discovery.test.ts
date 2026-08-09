@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { AlternatorDynamoDBClient, routing } from "../src/index.js";
 import { AlternatorDynamoDBClient as EdgeAlternatorDynamoDBClient } from "../src/edge.js";
 import { RecordingHandler } from "./helpers.js";
@@ -24,10 +24,19 @@ import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { HttpResponse } from "@smithy/protocol-http";
 import type { HttpRequest } from "@smithy/protocol-http";
 import type { HttpHandlerOptions } from "@smithy/types";
+import dns, { type LookupAddress } from "node:dns";
+import { lookup as dnsLookup } from "node:dns/promises";
+import { readFile } from "node:fs/promises";
 import { Agent, createServer, type Server } from "node:http";
-import type { LookupAddress } from "node:dns";
+import { createServer as createHttpsServer } from "node:https";
 import type { AddressInfo, LookupFunction } from "node:net";
 import { Readable } from "node:stream";
+import { createSecureContext, type TLSSocket } from "node:tls";
+
+vi.mock("node:dns/promises", async (importOriginal) => {
+  const original = await importOriginal<{ lookup: typeof dnsLookup }>();
+  return { ...original, lookup: vi.fn(original.lookup) };
+});
 
 const missingDatacenterQuery = { dc: "__alternator_client_missing_dc__" };
 const missingRackQuery = { rack: "__alternator_client_missing_rack__" };
@@ -526,6 +535,164 @@ describe("Alternator discovery", () => {
     }
   });
 
+  it("preserves logical TLS identity while falling back across real DNS addresses", async () => {
+    const logicalHost = "entrypoint.test";
+    const wrongLogicalHost = "wrong-entrypoint.test";
+    const [ca, certificate, key] = await Promise.all([
+      readFile(new URL("./fixtures/driver-815-ca.crt", import.meta.url), "utf8"),
+      readFile(new URL("./fixtures/driver-815-entrypoint.crt", import.meta.url), "utf8"),
+      readFile(new URL("./fixtures/driver-815-entrypoint.key", import.meta.url), "utf8"),
+    ]);
+    const requests: Array<{
+      host: string;
+      localAddress: string | undefined;
+      path: string | undefined;
+      serverName: string | false | null | undefined;
+    }> = [];
+    const serverNames: Array<{ address: "bad" | "good"; serverName: string }> = [];
+    const secureContext = createSecureContext({ cert: certificate, key });
+    const createTlsServer = (badAddress: boolean): Server => createHttpsServer(
+      {
+        cert: certificate,
+        key,
+        SNICallback: (serverName, callback) => {
+          serverNames.push({ address: badAddress ? "bad" : "good", serverName });
+          callback(null, secureContext);
+        },
+      },
+      (request, response) => {
+        requests.push({
+          host: request.headers.host ?? "",
+          localAddress: request.socket.localAddress,
+          path: request.url,
+          serverName: (request.socket as TLSSocket).servername,
+        });
+        response.setHeader("content-type", "application/x-amz-json-1.0");
+        if (request.url === "/localnodes") {
+          if (badAddress) {
+            response.statusCode = 503;
+            response.end(JSON.stringify({ error: "temporary" }));
+            return;
+          }
+          response.end(JSON.stringify([logicalHost]));
+          return;
+        }
+        response.end(JSON.stringify({ TableNames: [] }));
+      },
+    );
+
+    const badServer = createTlsServer(true);
+    const goodServer = createTlsServer(false);
+    const badAddress = await listen(badServer, "127.0.0.2");
+    let goodServerStarted = false;
+    const originalLookup = dns.lookup;
+    try {
+      await listen(goodServer, "127.0.0.1", badAddress.port);
+      goodServerStarted = true;
+      dns.lookup = logicalHostLookup(originalLookup, logicalHost, "127.0.0.1");
+      const resolvedAddresses: LookupAddress[] = [
+        { address: "127.0.0.2", family: 4 },
+        { address: "127.0.0.1", family: 4 },
+      ];
+      const lookupWithFallback = ((
+        hostname: string,
+        options?: { all?: boolean; verbatim?: boolean },
+      ) => {
+        expect([logicalHost, wrongLogicalHost]).toContain(hostname);
+        expect(options).toMatchObject({ all: true, verbatim: true });
+        return Promise.resolve(resolvedAddresses);
+      }) as unknown as typeof dnsLookup;
+
+      await vi.mocked(dnsLookup).withImplementation(lookupWithFallback, async () => {
+        const client = new AlternatorDynamoDBClient({
+          seeds: [logicalHost],
+          scheme: "https",
+          port: badAddress.port,
+          tls: { ca: { text: ca } },
+          credentials: { accessKeyId: "test", secretAccessKey: "test" },
+          discovery: { background: false, timeoutMs: 500 },
+          maxAttempts: 1,
+        });
+        try {
+          await expect(client.alternator.refreshNodes()).resolves.toEqual([
+            {
+              host: logicalHost,
+              scheme: "https",
+              port: badAddress.port,
+              url: `https://${logicalHost}:${badAddress.port}`,
+            },
+          ]);
+          expect(requests).toEqual([
+            {
+              host: `${logicalHost}:${badAddress.port}`,
+              localAddress: "127.0.0.2",
+              path: "/localnodes",
+              serverName: logicalHost,
+            },
+            {
+              host: `${logicalHost}:${badAddress.port}`,
+              localAddress: "127.0.0.1",
+              path: "/localnodes",
+              serverName: logicalHost,
+            },
+          ]);
+
+          await expect(client.send(new ListTablesCommand({}))).resolves.toMatchObject({
+            TableNames: [],
+          });
+          expect(requests.at(-1)).toEqual({
+            host: `${logicalHost}:${badAddress.port}`,
+            localAddress: "127.0.0.1",
+            path: "/",
+            serverName: logicalHost,
+          });
+          expect(serverNames).toEqual([
+            { address: "bad", serverName: logicalHost },
+            { address: "good", serverName: logicalHost },
+            { address: "good", serverName: logicalHost },
+          ]);
+        } finally {
+          client.destroy();
+        }
+
+        const requestsBeforeWrongIdentity = requests.length;
+        const wrongIdentityClient = new AlternatorDynamoDBClient({
+          seeds: [wrongLogicalHost],
+          scheme: "https",
+          port: badAddress.port,
+          tls: { ca: { text: ca } },
+          discovery: { background: false, timeoutMs: 500 },
+          maxAttempts: 1,
+        });
+        try {
+          await expect(wrongIdentityClient.alternator.refreshNodes()).resolves.toEqual([
+            {
+              host: wrongLogicalHost,
+              scheme: "https",
+              port: badAddress.port,
+              url: `https://${wrongLogicalHost}:${badAddress.port}`,
+            },
+          ]);
+          expect(requests).toHaveLength(requestsBeforeWrongIdentity);
+          expect(serverNames.slice(-2)).toEqual([
+            { address: "bad", serverName: wrongLogicalHost },
+            { address: "good", serverName: wrongLogicalHost },
+          ]);
+        } finally {
+          wrongIdentityClient.destroy();
+        }
+      });
+    } finally {
+      dns.lookup = originalLookup;
+      badServer.closeAllConnections?.();
+      goodServer.closeAllConnections?.();
+      await Promise.all([
+        close(badServer),
+        goodServerStarted ? close(goodServer) : Promise.resolve(),
+      ]);
+    }
+  });
+
   it("tries every unique DNS address after invalid /localnodes responses", async () => {
     const handler = new AddressFallbackRecordingHandler(
       () => ["http-error", "http-error", "malformed", "empty", "unusable", "good"],
@@ -786,10 +953,10 @@ describe("Alternator discovery", () => {
   });
 });
 
-function listen(server: Server, host = "127.0.0.1"): Promise<AddressInfo> {
+function listen(server: Server, host = "127.0.0.1", port = 0): Promise<AddressInfo> {
   return new Promise((resolve, reject) => {
     server.once("error", reject);
-    server.listen(0, host, () => {
+    server.listen(port, host, () => {
       server.off("error", reject);
       resolve(server.address() as AddressInfo);
     });
@@ -829,6 +996,36 @@ function dualStackHandler(addresses: LookupAddress[]): NodeHttpHandler {
       autoSelectFamilyAttemptTimeout: 10,
     }),
   });
+}
+
+function logicalHostLookup(
+  delegate: typeof dns.lookup,
+  logicalHost: string,
+  address: string,
+): typeof dns.lookup {
+  return ((hostname: string, optionsOrCallback: unknown, callbackValue?: unknown) => {
+    if (hostname !== logicalHost) {
+      Reflect.apply(delegate, dns, [hostname, optionsOrCallback, callbackValue]);
+      return;
+    }
+
+    const callback = typeof optionsOrCallback === "function"
+      ? optionsOrCallback
+      : callbackValue;
+    if (typeof callback !== "function") {
+      throw new TypeError("DNS lookup callback is required");
+    }
+    const respond = callback as (...values: unknown[]) => void;
+    const all = typeof optionsOrCallback === "object"
+      && optionsOrCallback !== null
+      && "all" in optionsOrCallback
+      && optionsOrCallback.all === true;
+    if (all) {
+      respond(null, [{ address, family: 4 }]);
+      return;
+    }
+    respond(null, address, 4);
+  }) as unknown as typeof dns.lookup;
 }
 
 class AddressFallbackRecordingHandler extends RecordingHandler {
