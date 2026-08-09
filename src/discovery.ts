@@ -17,13 +17,21 @@
 import { HttpRequest } from "@smithy/protocol-http";
 import type { HttpHandlerOptions } from "@smithy/types";
 import { bodyToString } from "./body.js";
-import { hostForUrl, nodeUrl } from "./config.js";
+import { hostForUrl, nodeUrl, normalizeSeed } from "./config.js";
 import { routingChain, type AlternatorRoutingScope, type LocalNodesQuery } from "./routing.js";
 import { AlternatorQueryPlan } from "./query-plan.js";
 import type { AlternatorNode, NormalizedAlternatorConfig } from "./types.js";
 
 interface DiscoveryRequestHandler {
   handle(request: HttpRequest, options?: HttpHandlerOptions): Promise<{ response: { statusCode: number; body?: unknown } }>;
+  readonly discoveryAddressFallback?: {
+    resolve(hostname: string): Promise<readonly string[]>;
+    handle(
+      request: HttpRequest,
+      address: string,
+      options?: HttpHandlerOptions,
+    ): Promise<{ response: { statusCode: number; body?: unknown } }>;
+  };
 }
 
 type RackDatacenterSupport = "supported" | "unsupported" | "unknown";
@@ -250,6 +258,48 @@ export class AlternatorDiscovery {
   }
 
   private async fetchLocalNodes(host: string, query: LocalNodesQuery): Promise<string[]> {
+    const fallback = this.requestHandler.discoveryAddressFallback;
+    if (!fallback) {
+      return this.fetchLocalNodesOnce(host, query);
+    }
+
+    const addresses = [...new Set(await fallback.resolve(host))];
+    if (addresses.length === 0) {
+      throw new Error(`DNS entrypoint ${host} resolved to no addresses`);
+    }
+
+    let lastError: unknown;
+    let sawEmptyResponse = false;
+    for (const address of addresses) {
+      try {
+        const nodes = await this.fetchLocalNodesOnce(host, query, address);
+        if (nodes.length > 0) {
+          return nodes;
+        }
+        sawEmptyResponse = true;
+      } catch (error) {
+        lastError = error;
+        this.config.logger.debug?.("alternator discovery: resolved address failed", {
+          host,
+          address,
+          query,
+          error,
+        });
+      }
+    }
+    if (sawEmptyResponse) {
+      return [];
+    }
+    throw new Error(lastError === undefined
+      ? `no resolved addresses are available for ${host}`
+      : errorMessage(lastError));
+  }
+
+  private async fetchLocalNodesOnce(
+    host: string,
+    query: LocalNodesQuery,
+    resolvedAddress?: string,
+  ): Promise<string[]> {
     const request = new HttpRequest({
       protocol: `${this.config.scheme}:`,
       method: "GET",
@@ -261,9 +311,10 @@ export class AlternatorDiscovery {
         host: hostHeader(host, this.config.port),
       },
     });
-    const response = await this.requestHandler.handle(request, {
-      requestTimeout: this.config.discovery.timeoutMs,
-    });
+    const options = { requestTimeout: this.config.discovery.timeoutMs };
+    const response = resolvedAddress === undefined
+      ? await this.requestHandler.handle(request, options)
+      : await this.requestHandler.discoveryAddressFallback!.handle(request, resolvedAddress, options);
 
     if (response.response.statusCode < 200 || response.response.statusCode >= 300) {
       await drainResponseBody(response.response.body, this.config.discovery.timeoutMs);
@@ -275,7 +326,11 @@ export class AlternatorDiscovery {
     if (!Array.isArray(parsed) || !parsed.every((node) => typeof node === "string")) {
       throw new Error("/localnodes returned an invalid node list");
     }
-    return parsed;
+    const nodes = normalizeDiscoveredHosts(parsed);
+    if (parsed.length > 0 && nodes.length === 0) {
+      throw new Error("/localnodes returned no usable nodes");
+    }
+    return nodes;
   }
 
   private toNode(host: string): AlternatorNode {
@@ -353,7 +408,15 @@ function missingScopeProbe(kind: RackDatacenterProbeKind): LocalNodesQuery {
 }
 
 function normalizeDiscoveredHosts(hosts: readonly string[]): string[] {
-  return [...new Set(hosts.map((host) => host.trim()).filter(Boolean))];
+  const normalized: string[] = [];
+  for (const host of hosts) {
+    try {
+      normalized.push(normalizeSeed(host));
+    } catch {
+      continue;
+    }
+  }
+  return [...new Set(normalized)];
 }
 
 function hostHeader(host: string, port: number): string {

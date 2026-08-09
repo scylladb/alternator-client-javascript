@@ -18,11 +18,16 @@ import { describe, expect, it } from "vitest";
 import { AlternatorDynamoDBClient, routing } from "../src/index.js";
 import { AlternatorDynamoDBClient as EdgeAlternatorDynamoDBClient } from "../src/edge.js";
 import { RecordingHandler } from "./helpers.js";
+import { jsonResponse } from "./helpers.js";
 import { ListTablesCommand } from "@aws-sdk/client-dynamodb";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
+import { HttpResponse } from "@smithy/protocol-http";
+import type { HttpRequest } from "@smithy/protocol-http";
+import type { HttpHandlerOptions } from "@smithy/types";
 import { Agent, createServer, type Server } from "node:http";
 import type { LookupAddress } from "node:dns";
 import type { AddressInfo, LookupFunction } from "node:net";
+import { Readable } from "node:stream";
 
 const missingDatacenterQuery = { dc: "__alternator_client_missing_dc__" };
 const missingRackQuery = { rack: "__alternator_client_missing_rack__" };
@@ -521,6 +526,144 @@ describe("Alternator discovery", () => {
     }
   });
 
+  it("tries every unique DNS address after invalid /localnodes responses", async () => {
+    const handler = new AddressFallbackRecordingHandler(
+      () => ["http-error", "http-error", "malformed", "empty", "unusable", "good"],
+      (address, request) => {
+        expect(request.hostname).toBe("entrypoint.test");
+        expect(request.headers.host).toBe("entrypoint.test:8080");
+        switch (address) {
+          case "http-error":
+            return jsonResponse({ error: "temporary" }, 503);
+          case "malformed":
+            return textResponse("malformed");
+          case "empty":
+            return jsonResponse([]);
+          case "unusable":
+            return jsonResponse(["bad host"]);
+          case "good":
+            return jsonResponse(["learned-node"]);
+          default:
+            throw new Error(`unexpected address ${address}`);
+        }
+      },
+    );
+    const client = new AlternatorDynamoDBClient({
+      seeds: ["entrypoint.test"],
+      requestHandler: handler,
+      discovery: { background: false },
+    });
+
+    try {
+      await expect(client.alternator.refreshNodes()).resolves.toEqual([
+        {
+          host: "learned-node",
+          scheme: "http",
+          port: 8080,
+          url: "http://learned-node:8080",
+        },
+      ]);
+      expect(handler.resolvedAddresses).toEqual([
+        "http-error",
+        "malformed",
+        "empty",
+        "unusable",
+        "good",
+      ]);
+      await expect(client.send(new ListTablesCommand({}))).resolves.toMatchObject({
+        TableNames: [],
+      });
+      expect(handler.requests.at(-1)?.hostname).toBe("learned-node");
+    } finally {
+      client.destroy();
+    }
+  });
+
+  it("re-resolves original seed after learned nodes fail and preserves last valid nodes", async () => {
+    let answers = ["old-address"];
+    const unavailable = new Set<string>();
+    const handler = new AddressFallbackRecordingHandler(
+      () => answers,
+      (address) => {
+        if (unavailable.has(address)) {
+          return jsonResponse({ error: "unavailable" }, 503);
+        }
+        if (address === "old-address") {
+          return jsonResponse(["old-node"]);
+        }
+        if (address === "new-address") {
+          return jsonResponse(["new-node"]);
+        }
+        return jsonResponse({ error: "unavailable" }, 503);
+      },
+    );
+    const client = new AlternatorDynamoDBClient({
+      seeds: ["entrypoint.test"],
+      requestHandler: handler,
+      discovery: { background: false },
+    });
+
+    try {
+      await client.alternator.refreshNodes();
+      expect(client.alternator.nodes().map(({ host }) => host)).toEqual(["old-node"]);
+
+      unavailable.add("old-address");
+      answers = ["broken-address", "new-address"];
+      await client.alternator.refreshNodes();
+      expect(client.alternator.nodes().map(({ host }) => host)).toEqual(["new-node"]);
+
+      unavailable.add("new-address");
+      answers = ["broken-address"];
+      await client.alternator.refreshNodes();
+      expect(client.alternator.nodes().map(({ host }) => host)).toEqual(["new-node"]);
+      expect(handler.resolveCalls).toBe(3);
+    } finally {
+      client.destroy();
+    }
+  });
+
+  it("coalesces overlapping DNS refreshes and publishes only the complete result", async () => {
+    let releaseResponse: (() => void) | undefined;
+    const responseGate = new Promise<void>((resolve) => {
+      releaseResponse = resolve;
+    });
+    const handler = new AddressFallbackRecordingHandler(
+      () => ["address-a"],
+      async () => {
+        await responseGate;
+        return jsonResponse(["node-a", "node-b"]);
+      },
+    );
+    const client = new AlternatorDynamoDBClient({
+      seeds: ["entrypoint.test"],
+      requestHandler: handler,
+      discovery: { background: false },
+    });
+
+    try {
+      const first = client.alternator.refreshNodes();
+      const second = client.alternator.refreshNodes();
+      await Promise.resolve();
+      expect(handler.resolveCalls).toBe(1);
+      expect(client.alternator.nodes().map(({ host }) => host)).toEqual(["entrypoint.test"]);
+
+      releaseResponse?.();
+      await expect(Promise.all([first, second])).resolves.toEqual([
+        [
+          { host: "node-a", scheme: "http", port: 8080, url: "http://node-a:8080" },
+          { host: "node-b", scheme: "http", port: 8080, url: "http://node-b:8080" },
+        ],
+        [
+          { host: "node-a", scheme: "http", port: 8080, url: "http://node-a:8080" },
+          { host: "node-b", scheme: "http", port: 8080, url: "http://node-b:8080" },
+        ],
+      ]);
+      expect(client.alternator.nodes().map(({ host }) => host)).toEqual(["node-a", "node-b"]);
+    } finally {
+      client.destroy();
+    }
+  });
+
   it("bounds draining non-terminating non-2xx discovery bodies", async () => {
     let requests = 0;
     const server = createServer((request, response) => {
@@ -657,5 +800,47 @@ function dualStackHandler(addresses: LookupAddress[]): NodeHttpHandler {
       autoSelectFamily: true,
       autoSelectFamilyAttemptTimeout: 10,
     }),
+  });
+}
+
+class AddressFallbackRecordingHandler extends RecordingHandler {
+  readonly resolvedAddresses: string[] = [];
+  resolveCalls = 0;
+  readonly discoveryAddressFallback: {
+    resolve(hostname: string): Promise<readonly string[]>;
+    handle(
+      request: HttpRequest,
+      address: string,
+      options?: HttpHandlerOptions,
+    ): Promise<{ response: HttpResponse }>;
+  };
+
+  constructor(
+    resolve: (hostname: string) => readonly string[],
+    responder: (
+      address: string,
+      request: HttpRequest,
+      options?: HttpHandlerOptions,
+    ) => HttpResponse | Promise<HttpResponse>,
+  ) {
+    super((request) => request.path === "/localnodes" ? [] : { TableNames: [] });
+    this.discoveryAddressFallback = {
+      resolve: (hostname) => {
+        this.resolveCalls += 1;
+        return Promise.resolve(resolve(hostname));
+      },
+      handle: (request, address, options) => {
+        this.resolvedAddresses.push(address);
+        return Promise.resolve(responder(address, request, options)).then((response) => ({ response }));
+      },
+    };
+  }
+}
+
+function textResponse(body: string, statusCode = 200): HttpResponse {
+  return new HttpResponse({
+    statusCode,
+    headers: { "content-type": "application/json" },
+    body: Readable.from([body]),
   });
 }

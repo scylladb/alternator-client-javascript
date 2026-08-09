@@ -22,15 +22,36 @@ import type {
 
 type GenericHttpHandler = HttpHandler<Record<string, unknown>>;
 export type ResponseDecompressor = (response: HttpResponse) => Promise<HttpResponse>;
+interface DiscoveryAddressFallback {
+  resolve(hostname: string): Promise<readonly string[]>;
+  handle(
+    request: HttpRequest,
+    address: string,
+    options?: HttpHandlerOptions,
+  ): Promise<{ response: HttpResponse }>;
+}
 
 class ResponseCompressionHttpHandler implements GenericHttpHandler {
   readonly metadata: RequestHandlerMetadata;
+  readonly discoveryAddressFallback: DiscoveryAddressFallback | undefined;
 
   constructor(
     private readonly delegate: GenericHttpHandler,
     private readonly decompressResponse: ResponseDecompressor,
   ) {
     this.metadata = delegate.metadata ?? { handlerProtocol: "http/1.1" };
+    const addressFallback = (delegate as GenericHttpHandler & {
+      discoveryAddressFallback?: DiscoveryAddressFallback;
+    }).discoveryAddressFallback;
+    this.discoveryAddressFallback = addressFallback
+      ? {
+          resolve: (hostname) => addressFallback.resolve(hostname),
+          handle: async (request, address, options) => {
+            const result = await addressFallback.handle(request, address, options);
+            return { response: await this.decompressResponse(result.response) };
+          },
+        }
+      : undefined;
   }
 
   async handle(

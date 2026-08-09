@@ -21,6 +21,8 @@ import type {
   NodeHttpHandlerOptions,
 } from "@smithy/types";
 import { readFile } from "node:fs/promises";
+import { lookup as dnsLookup } from "node:dns/promises";
+import { isIP, type LookupFunction } from "node:net";
 import { compressBody, decompressResponse } from "./compression-node.js";
 import { withResponseCompression } from "./runtime-common.js";
 import type {
@@ -64,10 +66,27 @@ function createRequestHandler(
 
 class LazyNodeHttpHandler implements Handler {
   readonly metadata = { handlerProtocol: "http/1.1" };
+  readonly discoveryAddressFallback: {
+    resolve(hostname: string): Promise<readonly string[]>;
+    handle(
+      request: HttpRequest,
+      address: string,
+      options?: HttpHandlerOptions,
+    ): Promise<{ response: HttpResponse }>;
+  };
   private delegate?: Handler;
+  private readonly addressDelegates = new Map<string, Handler>();
   private pendingUpdates = new Map<keyof NodeHttpHandlerOptions, NodeHttpHandlerOptions[keyof NodeHttpHandlerOptions]>();
 
-  constructor(private readonly optionsProvider: () => Promise<NodeHttpHandlerOptions>) {}
+  constructor(private readonly optionsProvider: () => Promise<NodeHttpHandlerOptions>) {
+    this.discoveryAddressFallback = {
+      resolve: (hostname) => resolveHostAddresses(hostname),
+      handle: async (request, address, options) => {
+        const delegate = await this.getAddressDelegate(address);
+        return delegate.handle(request, options);
+      },
+    };
+  }
 
   async handle(
     request: HttpRequest,
@@ -79,6 +98,10 @@ class LazyNodeHttpHandler implements Handler {
 
   destroy(): void {
     this.delegate?.destroy?.();
+    for (const delegate of this.addressDelegates.values()) {
+      delegate.destroy?.();
+    }
+    this.addressDelegates.clear();
   }
 
   updateHttpClientConfig<K extends keyof NodeHttpHandlerOptions>(
@@ -109,6 +132,67 @@ class LazyNodeHttpHandler implements Handler {
     }
     return this.delegate;
   }
+
+  private async getAddressDelegate(address: string): Promise<Handler> {
+    const existing = this.addressDelegates.get(address);
+    if (existing) {
+      return existing;
+    }
+
+    // Bound handlers retained for keep-alive reuse when DNS answers change repeatedly.
+    if (this.addressDelegates.size >= 32) {
+      const oldest = this.addressDelegates.entries().next().value;
+      if (oldest) {
+        oldest[1].destroy?.();
+        this.addressDelegates.delete(oldest[0]);
+      }
+    }
+
+    const options = await this.optionsProvider();
+    for (const [key, value] of this.pendingUpdates) {
+      (options as Record<string, unknown>)[key] = value;
+    }
+    const lookup = lookupAddress(address);
+    const delegate = new NodeHttpHandler({
+      ...options,
+      httpAgent: agentOptionsWithLookup(options.httpAgent, lookup),
+      httpsAgent: agentOptionsWithLookup(options.httpsAgent, lookup),
+    });
+    this.addressDelegates.set(address, delegate);
+    return delegate;
+  }
+}
+
+async function resolveHostAddresses(hostname: string): Promise<string[]> {
+  const unbracketed = hostname.startsWith("[") && hostname.endsWith("]")
+    ? hostname.slice(1, -1)
+    : hostname;
+  if (isIP(unbracketed) !== 0) {
+    return [unbracketed];
+  }
+  const addresses = await dnsLookup(unbracketed, { all: true, verbatim: true });
+  return [...new Set(addresses.map(({ address }) => address))];
+}
+
+function lookupAddress(address: string): LookupFunction {
+  const family = isIP(address);
+  return (_hostname, options, callback) => {
+    if (options.all) {
+      callback(null, [{ address, family }]);
+      return;
+    }
+    callback(null, address, family);
+  };
+}
+
+function agentOptionsWithLookup(
+  options: NodeHttpHandlerOptions["httpAgent"] | NodeHttpHandlerOptions["httpsAgent"],
+  lookup: LookupFunction,
+): Record<string, unknown> {
+  if (typeof options === "object" && options !== null && !("addRequest" in options)) {
+    return { ...options, lookup };
+  }
+  return { keepAlive: false, lookup };
 }
 
 async function buildNodeHandlerOptions(

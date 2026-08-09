@@ -137,7 +137,7 @@ function normalizeSeeds(seeds: readonly string[]): string[] {
   return seeds.map(normalizeSeed);
 }
 
-function normalizeSeed(seed: string): string {
+export function normalizeSeed(seed: string): string {
   if (typeof seed !== "string") {
     throw new TypeError("each seed must be a hostname or IP address string");
   }
@@ -145,6 +145,9 @@ function normalizeSeed(seed: string): string {
   const trimmed = seed.trim();
   if (trimmed === "") {
     throw new TypeError("seeds cannot contain an empty host");
+  }
+  if (/\s/.test(trimmed)) {
+    throw new TypeError(`seed "${seed}" must not contain whitespace`);
   }
   if (trimmed.includes("://") || /[/?#]/.test(trimmed)) {
     throw new TypeError(`seed "${seed}" must be a host, not a URL`);
