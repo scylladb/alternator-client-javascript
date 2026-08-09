@@ -622,6 +622,34 @@ describe("Alternator discovery", () => {
     }
   });
 
+  it("bounds a stalled DNS lookup and continues through another configured seed", async () => {
+    const handler = new AddressFallbackRecordingHandler(
+      (hostname) => hostname === "stalled.test"
+        ? new Promise<readonly string[]>(() => undefined)
+        : ["healthy-address"],
+      (address) => address === "healthy-address"
+        ? jsonResponse(["learned-node"])
+        : jsonResponse({ error: "unavailable" }, 503),
+    );
+    const client = new AlternatorDynamoDBClient({
+      seeds: ["stalled.test", "healthy.test"],
+      requestHandler: handler,
+      discovery: { background: false, timeoutMs: 20 },
+    });
+
+    try {
+      const startedAt = Date.now();
+      await expect(client.alternator.refreshNodes()).resolves.toEqual([
+        { host: "learned-node", scheme: "http", port: 8080, url: "http://learned-node:8080" },
+      ]);
+      expect(Date.now() - startedAt).toBeLessThan(500);
+      expect(handler.resolveCalls).toBe(2);
+      expect(handler.resolvedAddresses).toEqual(["healthy-address"]);
+    } finally {
+      client.destroy();
+    }
+  });
+
   it("coalesces overlapping DNS refreshes and publishes only the complete result", async () => {
     let releaseResponse: (() => void) | undefined;
     const responseGate = new Promise<void>((resolve) => {
@@ -816,7 +844,7 @@ class AddressFallbackRecordingHandler extends RecordingHandler {
   };
 
   constructor(
-    resolve: (hostname: string) => readonly string[],
+    resolve: (hostname: string) => readonly string[] | Promise<readonly string[]>,
     responder: (
       address: string,
       request: HttpRequest,

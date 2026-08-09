@@ -263,7 +263,11 @@ export class AlternatorDiscovery {
       return this.fetchLocalNodesOnce(host, query);
     }
 
-    const addresses = [...new Set(await fallback.resolve(host))];
+    const addresses = [...new Set(await withTimeout(
+      fallback.resolve(host),
+      this.config.discovery.timeoutMs,
+      `DNS lookup for ${host}`,
+    ))];
     if (addresses.length === 0) {
       throw new Error(`DNS entrypoint ${host} resolved to no addresses`);
     }
@@ -340,6 +344,24 @@ export class AlternatorDiscovery {
       port: this.config.port,
       url: nodeUrl(host, this.config),
     };
+  }
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, operation: string): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<never>((_resolve, reject) => {
+    timeout = setTimeout(() => {
+      reject(new Error(`${operation} timed out after ${Math.max(1, timeoutMs)}ms`));
+    }, Math.max(1, timeoutMs));
+    timeout.unref?.();
+  });
+
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
   }
 }
 

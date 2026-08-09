@@ -31,6 +31,8 @@ import type {
   NormalizedAlternatorConfig,
 } from "./types.js";
 
+const MAX_IN_FLIGHT_DNS_LOOKUPS = 64;
+
 type Handler = HttpHandler<NodeHttpHandlerOptions>;
 
 export const nodeRuntimePlatform = {
@@ -76,11 +78,12 @@ class LazyNodeHttpHandler implements Handler {
   };
   private delegate?: Handler;
   private readonly addressDelegates = new Map<string, Handler>();
+  private readonly inFlightDnsLookups = new Map<string, Promise<readonly string[]>>();
   private pendingUpdates = new Map<keyof NodeHttpHandlerOptions, NodeHttpHandlerOptions[keyof NodeHttpHandlerOptions]>();
 
   constructor(private readonly optionsProvider: () => Promise<NodeHttpHandlerOptions>) {
     this.discoveryAddressFallback = {
-      resolve: (hostname) => resolveHostAddresses(hostname),
+      resolve: (hostname) => this.resolveDiscoveryHost(hostname),
       handle: async (request, address, options) => {
         const delegate = await this.getAddressDelegate(address);
         return delegate.handle(request, options);
@@ -160,6 +163,26 @@ class LazyNodeHttpHandler implements Handler {
     });
     this.addressDelegates.set(address, delegate);
     return delegate;
+  }
+
+  private resolveDiscoveryHost(hostname: string): Promise<readonly string[]> {
+    const key = hostname.toLowerCase();
+    const existing = this.inFlightDnsLookups.get(key);
+    if (existing) {
+      return existing;
+    }
+    if (this.inFlightDnsLookups.size >= MAX_IN_FLIGHT_DNS_LOOKUPS) {
+      return Promise.reject(new Error("too many DNS lookups are still pending"));
+    }
+
+    const pending = resolveHostAddresses(hostname);
+    this.inFlightDnsLookups.set(key, pending);
+    void pending.finally(() => {
+      if (this.inFlightDnsLookups.get(key) === pending) {
+        this.inFlightDnsLookups.delete(key);
+      }
+    }).catch(() => undefined);
+    return pending;
   }
 }
 
