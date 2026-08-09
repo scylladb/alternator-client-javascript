@@ -18,7 +18,9 @@ import type { HttpResponse } from "@smithy/protocol-http";
 import { bodyToBytes } from "./body.js";
 import {
   bodyToReadableStream,
+  compressedChunkToBytes,
   mapCompressedResponse,
+  type ResponseDecompressionOptions,
 } from "./compression-shared.js";
 import type { CompressedBody } from "./compression-types.js";
 import type {
@@ -57,18 +59,97 @@ export async function compressBody(
   };
 }
 
-export async function decompressResponse(response: HttpResponse): Promise<HttpResponse> {
-  return mapCompressedResponse(response, decompressWebResponseBody);
+export async function decompressResponse(
+  response: HttpResponse,
+  options?: ResponseDecompressionOptions,
+): Promise<HttpResponse> {
+  return mapCompressedResponse(response, decompressWebResponseBody, options);
 }
 
 async function decompressWebResponseBody(
   body: unknown,
   encoding: AlternatorResponseCompressionAlgorithm,
+  options: ResponseDecompressionOptions = {},
 ): Promise<unknown> {
   if (typeof DecompressionStream === "undefined") {
     throw new Error("response compression requires DecompressionStream support in edge runtime");
   }
 
-  const stream = await bodyToReadableStream(body);
-  return stream.pipeThrough(new DecompressionStream(encoding));
+  const stream = cancellationSafeReadableStream(await bodyToReadableStream(body, options));
+  const pipeOptions = options.signal ? { signal: options.signal } : undefined;
+  const boundedStream = Number.isFinite(options.maxCompressedBytes)
+    ? stream.pipeThrough(compressedInputLimiter(options.maxCompressedBytes!), pipeOptions)
+    : stream;
+  return boundedStream.pipeThrough(new DecompressionStream(encoding), pipeOptions);
+}
+
+function cancellationSafeReadableStream(source: ReadableStream): ReadableStream<unknown> {
+  const reader = source.getReader();
+  let finished = false;
+  let released = false;
+
+  const release = () => {
+    if (released) {
+      return;
+    }
+    try {
+      reader.releaseLock();
+      released = true;
+    } catch (_error) {
+      // A pending read will retry the release when it settles after cancel().
+    }
+  };
+
+  return new ReadableStream<unknown>({
+    async pull(controller) {
+      try {
+        const result = await reader.read();
+        if (finished) {
+          release();
+          return;
+        }
+        if (result.done) {
+          finished = true;
+          release();
+          controller.close();
+          return;
+        }
+        controller.enqueue(result.value);
+      } catch (error) {
+        if (finished) {
+          release();
+          return;
+        }
+        finished = true;
+        release();
+        controller.error(error);
+      }
+    },
+    cancel(reason) {
+      if (!finished) {
+        finished = true;
+        try {
+          const cancellation = reader.cancel(reason);
+          void cancellation.catch(() => undefined);
+        } catch (_error) {
+          // Preserve the downstream cancellation reason.
+        }
+      }
+      release();
+    },
+  });
+}
+
+function compressedInputLimiter(maxBytes: number): TransformStream<unknown, Uint8Array> {
+  let size = 0;
+  return new TransformStream<unknown, Uint8Array>({
+    transform(chunk, controller) {
+      const bytes = compressedChunkToBytes(chunk);
+      size += bytes.byteLength;
+      if (size > maxBytes) {
+        throw new Error(`compressed response body exceeds ${maxBytes} bytes`);
+      }
+      controller.enqueue(bytes);
+    },
+  });
 }

@@ -134,6 +134,18 @@ routing.rack({
 the returned local-node lists. In multi-datacenter deployments, configure at
 least one seed per datacenter.
 
+With rack/datacenter routing and no cluster fallback, configured seeds are
+discovery entrypoints only. They are not exposed as application routes until a
+matching scoped `/localnodes` response validates nodes; the first command runs
+that bounded discovery automatically when no validated route is available.
+
+`discovery.timeoutMs` is one total budget for a discovery or routing-validation
+call. The client shares that budget across scope probes, candidate hosts, DNS
+lookups, and resolved-address attempts while reserving time for the original
+seeds. In the Node runtime, seed hostnames are re-resolved on each discovery
+cycle and unique addresses are tried in resolver order without changing the
+logical Host or TLS identity. A failed refresh retains the last valid node set.
+
 ## Runtime Matrix
 
 | Feature | Node | Edge |

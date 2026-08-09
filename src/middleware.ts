@@ -20,12 +20,14 @@ import { applyResponseEncodingHeaders } from "./compression-shared.js";
 import { hostForUrl } from "./config.js";
 import type { AlternatorDiscovery } from "./discovery.js";
 import type { KeyRouteAffinityPlanner } from "./affinity.js";
-import type { AlternatorQueryPlan } from "./query-plan.js";
+import { AlternatorQueryPlan } from "./query-plan.js";
 import type { AlternatorNode, NormalizedAlternatorConfig } from "./types.js";
 import { applyUserAgent } from "./user-agent.js";
 import type { AlternatorBodyCompressor } from "./compression-types.js";
 
 const queryPlanKey = "__alternatorQueryPlan";
+const recoveryRefreshKey = "__alternatorRecoveryRefresh";
+const attemptedNodeUrlsKey = "__alternatorAttemptedNodeUrls";
 
 export interface AlternatorMiddlewareOptions {
   discovery: AlternatorDiscovery;
@@ -45,11 +47,15 @@ export function createAlternatorRequestMiddleware<Input extends object, Output e
       return next(args);
     }
 
-    await discovery.refreshIfDue();
+    if (discovery.getLiveNodes().length === 0) {
+      await discovery.refreshLiveNodes();
+    } else {
+      await discovery.refreshIfDue();
+    }
 
-    const node = nextNodeForAttempt(context, args.input, discovery, keyAffinity);
+    const node = await nextNodeForAttempt(context, args.input, discovery, keyAffinity);
     if (!node) {
-      throw new Error("Alternator query plan exhausted");
+      throw new Error("Alternator discovery produced no routable nodes for the configured scope");
     }
 
     let request = HttpRequest.clone(args.request);
@@ -119,27 +125,48 @@ export function createAlternatorPostSigningMiddleware<Input extends object, Outp
   };
 }
 
-function nextNodeForAttempt<Input extends object>(
+async function nextNodeForAttempt<Input extends object>(
   context: HandlerExecutionContext,
   input: Input,
   discovery: AlternatorDiscovery,
   keyAffinity: KeyRouteAffinityPlanner,
-): AlternatorNode | undefined {
+): Promise<AlternatorNode | undefined> {
   const contextRecord = context as HandlerExecutionContext & {
     [queryPlanKey]?: AlternatorQueryPlan;
+    [recoveryRefreshKey]?: boolean;
+    [attemptedNodeUrlsKey]?: Set<string>;
   };
+  const attemptedNodeUrls = contextRecord[attemptedNodeUrlsKey] ??= new Set<string>();
 
   if (!contextRecord[queryPlanKey]) {
-    contextRecord[queryPlanKey] = createQueryPlan(context, input, discovery, keyAffinity);
+    contextRecord[queryPlanKey] = createQueryPlan(
+      context,
+      input,
+      discovery,
+      keyAffinity,
+      attemptedNodeUrls,
+    );
+    return nextUnrecordedNode(contextRecord[queryPlanKey], attemptedNodeUrls);
   }
 
   const node = contextRecord[queryPlanKey].next();
   if (node) {
+    attemptedNodeUrls.add(node.url);
     return node;
   }
 
-  contextRecord[queryPlanKey] = createQueryPlan(context, input, discovery, keyAffinity);
-  return contextRecord[queryPlanKey].next();
+  if (!contextRecord[recoveryRefreshKey]) {
+    contextRecord[recoveryRefreshKey] = true;
+    await discovery.refreshLiveNodes();
+  }
+  contextRecord[queryPlanKey] = createQueryPlan(
+    context,
+    input,
+    discovery,
+    keyAffinity,
+    attemptedNodeUrls,
+  );
+  return nextUnrecordedNode(contextRecord[queryPlanKey], attemptedNodeUrls);
 }
 
 function createQueryPlan<Input extends object>(
@@ -147,9 +174,26 @@ function createQueryPlan<Input extends object>(
   input: Input,
   discovery: AlternatorDiscovery,
   keyAffinity: KeyRouteAffinityPlanner,
+  attemptedNodeUrls: ReadonlySet<string>,
 ): AlternatorQueryPlan {
-  const nodes = discovery.getLiveNodes();
-  return keyAffinity.queryPlanForInput(input, nodes, context.commandName) ?? discovery.createQueryPlan();
+  const allNodes = discovery.getLiveNodes();
+  const untriedNodes = allNodes.filter((node) => !attemptedNodeUrls.has(node.url));
+  // Once every currently published node has been attempted, preserve the SDK's
+  // configured retry count by starting another pass. A refresh that introduced
+  // a genuinely new node must try it before revisiting a failed LKG endpoint.
+  const nodes = untriedNodes.length > 0 ? untriedNodes : allNodes;
+  return keyAffinity.queryPlanForInput(input, nodes, context.commandName) ?? new AlternatorQueryPlan(nodes);
+}
+
+function nextUnrecordedNode(
+  queryPlan: AlternatorQueryPlan,
+  attemptedNodeUrls: Set<string>,
+): AlternatorNode | undefined {
+  const node = queryPlan.next();
+  if (node) {
+    attemptedNodeUrls.add(node.url);
+  }
+  return node;
 }
 
 function whitelistHeaders(
