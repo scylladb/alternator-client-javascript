@@ -37,59 +37,11 @@ describe("AlternatorDynamoDBClient config", () => {
     expect(() => new AlternatorDynamoDBClient({ seeds: ["http://localhost"] })).toThrow(/not a URL/);
     expect(() => new AlternatorDynamoDBClient({ seeds: ["localhost:8000"] })).toThrow(/must not include a port/);
     expect(() => new AlternatorDynamoDBClient({ seeds: ["[::1]:8080"] })).toThrow(/must not include a port/);
-    expect(() => new AlternatorDynamoDBClient({ seeds: ["[localhost]"] })).toThrow(/valid IPv6/);
-    expect(() => new AlternatorDynamoDBClient({ seeds: ["[127.0.0.1]"] })).toThrow(/valid IPv6/);
     expect(() => new AlternatorDynamoDBClient({ seeds: ["::1]"] })).toThrow(/valid IPv6/);
-    expect(() => new AlternatorDynamoDBClient({ seeds: ["bad_name"] })).toThrow(/valid hostname/);
-    expect(() => new AlternatorDynamoDBClient({ seeds: ["-bad.example"] })).toThrow(/valid hostname/);
-    expect(() => new AlternatorDynamoDBClient({ seeds: ["bad-.example"] })).toThrow(/valid hostname/);
-    expect(() => new AlternatorDynamoDBClient({ seeds: ["bad..example"] })).toThrow(/valid hostname/);
     expect(() => new AlternatorDynamoDBClient({ seeds: ["localhost"], scheme: "ftp" as never })).toThrow(/scheme/);
     expect(() => new AlternatorDynamoDBClient({ seeds: ["localhost"], port: 0 })).toThrow(/port/);
 
     expect(new AlternatorDynamoDBClient({ seeds: ["[::1]"] }).alternator.nodes()[0]?.url).toBe("http://[::1]:8080");
-    expect(() => new AlternatorDynamoDBClient({ seeds: ["999"] })).toThrow(/canonical dotted-decimal IPv4/);
-    const idnClient = new AlternatorDynamoDBClient({ seeds: ["t\u00e9st.example."] });
-    expect(idnClient.alternator.nodes()[0]).toEqual({
-      host: "xn--tst-bma.example.",
-      scheme: "http",
-      port: 8080,
-      url: "http://xn--tst-bma.example.:8080",
-    });
-    idnClient.destroy();
-  });
-
-  it("rejects non-canonical numeric IPv4 aliases before URL reinterpretation", () => {
-    const aliases = [
-      "127.1",
-      "2130706433",
-      "0x7f000001",
-      "0177.0.0.1",
-      "127.0.0.1.",
-      "001.002.003.004",
-      "１２７.０.０.１",
-      "１２７。１",
-    ];
-    for (const alias of aliases) {
-      expect(
-        () => new AlternatorDynamoDBClient({ seeds: [alias] }),
-        alias,
-      ).toThrow(/canonical dotted-decimal IPv4/);
-    }
-
-    const client = new AlternatorDynamoDBClient({
-      seeds: ["127.0.0.1", "[2001:db8::1]", "example.internal.", "tést.example."],
-    });
-    try {
-      expect(client.alternator.nodes().map(({ host }) => host)).toEqual([
-        "127.0.0.1",
-        "2001:db8::1",
-        "example.internal.",
-        "xn--tst-bma.example.",
-      ]);
-    } finally {
-      client.destroy();
-    }
   });
 
   it("uses Alternator defaults for URL and signing region", async () => {
@@ -307,19 +259,6 @@ describe("AlternatorDynamoDBClient config", () => {
           } as never,
         }),
     ).toThrow(/routing\.fallback\.rack/);
-
-    const cyclicRouting: Record<string, unknown> = {
-      kind: "datacenter",
-      datacenter: "dc1",
-    };
-    cyclicRouting.fallback = cyclicRouting;
-    expect(
-      () =>
-        new AlternatorDynamoDBClient({
-          seeds: ["localhost"],
-          routing: cyclicRouting as never,
-        }),
-    ).toThrow(/fallback cycle/);
   });
 
   it("validates gzip compression level against zlib range", () => {

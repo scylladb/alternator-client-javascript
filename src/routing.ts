@@ -15,7 +15,6 @@
  */
 
 export type AlternatorRoutingScopeKind = "cluster" | "datacenter" | "rack";
-export const MAX_ROUTING_CHAIN_LENGTH = 32;
 
 export interface AlternatorRoutingFallbackOptions {
   fallback?: AlternatorRoutingScope;
@@ -94,19 +93,6 @@ export const routing = {
 };
 
 export function routingChain(scope: AlternatorRoutingScope): AlternatorRoutingScope[] {
-  const chain: AlternatorRoutingScope[] = [];
-  const seen = new Set<AlternatorRoutingScope>();
-  let current: AlternatorRoutingScope | undefined = scope;
-  while (current) {
-    if (seen.has(current)) {
-      throw new TypeError("routing must not contain a fallback cycle");
-    }
-    if (chain.length >= MAX_ROUTING_CHAIN_LENGTH) {
-      throw new TypeError(`routing cannot contain more than ${MAX_ROUTING_CHAIN_LENGTH} scopes`);
-    }
-    seen.add(current);
-    chain.push(current);
-    current = "fallback" in current ? current.fallback : undefined;
-  }
-  return chain;
+  const fallback = "fallback" in scope ? scope.fallback : undefined;
+  return fallback ? [scope, ...routingChain(fallback)] : [scope];
 }

@@ -18,11 +18,6 @@ import { HttpResponse } from "@smithy/protocol-http";
 import { bodyToBytes } from "./body.js";
 import type { AlternatorResponseCompressionAlgorithm } from "./types.js";
 
-export interface ResponseDecompressionOptions {
-  readonly signal?: AbortSignal;
-  readonly maxCompressedBytes?: number;
-}
-
 export function applyResponseEncodingHeaders(
   headers: Record<string, string | undefined>,
   algorithms: readonly AlternatorResponseCompressionAlgorithm[],
@@ -65,9 +60,7 @@ export async function mapCompressedResponse(
   decompressBody: (
     body: unknown,
     encoding: AlternatorResponseCompressionAlgorithm,
-    options?: ResponseDecompressionOptions,
   ) => Promise<unknown>,
-  options?: ResponseDecompressionOptions,
 ): Promise<HttpResponse> {
   const encoding = responseContentEncoding(getHeader(response.headers, "content-encoding"));
   const body: unknown = response.body;
@@ -75,7 +68,7 @@ export async function mapCompressedResponse(
     return response;
   }
 
-  const decodedBody = await decompressBody(body, encoding, options);
+  const decodedBody = await decompressBody(body, encoding);
   return new HttpResponse({
     statusCode: response.statusCode,
     ...(response.reason !== undefined ? { reason: response.reason } : {}),
@@ -84,10 +77,7 @@ export async function mapCompressedResponse(
   });
 }
 
-export async function bodyToReadableStream(
-  body: unknown,
-  options: ResponseDecompressionOptions = {},
-): Promise<ReadableStream> {
+export async function bodyToReadableStream(body: unknown): Promise<ReadableStream> {
   if (typeof ReadableStream !== "undefined" && body instanceof ReadableStream) {
     return body;
   }
@@ -95,19 +85,8 @@ export async function bodyToReadableStream(
     return body.stream();
   }
 
-  const bytes = bodyToBytes(body);
-  if (bytes) {
-    return bytesToReadableStream(bytes);
-  }
-  if (isAsyncIterable(body)) {
-    return asyncIterableToReadableStream(body);
-  }
-  if (isTransformableByteBody(body) && Number.isFinite(options.maxCompressedBytes)) {
-    throw new Error("transform-only compressed response body cannot be read within a finite byte limit");
-  }
-
-  const transformed = await abortable(bodyToAsyncBytes(body), options.signal);
-  return bytesToReadableStream(transformed);
+  const bytes = await bodyToAsyncBytes(body);
+  return new Blob([bytesToArrayBuffer(bytes)]).stream();
 }
 
 export async function bodyToAsyncBytes(body: unknown): Promise<Uint8Array> {
@@ -127,7 +106,7 @@ export async function bodyToAsyncBytes(body: unknown): Promise<Uint8Array> {
   if (isAsyncIterable(body)) {
     const chunks: Uint8Array[] = [];
     for await (const chunk of body) {
-      chunks.push(compressedChunkToBytes(chunk));
+      chunks.push(chunkToBytes(chunk));
     }
     return concatBytes(chunks);
   }
@@ -183,7 +162,7 @@ function getHeader(headers: Record<string, string | undefined>, name: string): s
   return undefined;
 }
 
-export function compressedChunkToBytes(chunk: unknown): Uint8Array {
+function chunkToBytes(chunk: unknown): Uint8Array {
   const bytes = bodyToBytes(chunk);
   if (bytes) {
     return bytes;
@@ -200,91 +179,6 @@ export function compressedChunkToBytes(chunk: unknown): Uint8Array {
   }
 }
 
-function bytesToReadableStream(bytes: Uint8Array): ReadableStream<Uint8Array> {
-  return new ReadableStream<Uint8Array>({
-    start(controller) {
-      controller.enqueue(bytes);
-      controller.close();
-    },
-  });
-}
-
-function asyncIterableToReadableStream(body: AsyncIterable<unknown>): ReadableStream<Uint8Array> {
-  const iterator = body[Symbol.asyncIterator]();
-  let finished = false;
-
-  const cancelIterator = () => {
-    if (finished) {
-      return;
-    }
-    finished = true;
-    try {
-      const cancellation = iterator.return?.();
-      if (cancellation) {
-        void Promise.resolve(cancellation).catch(() => undefined);
-      }
-    } catch (_error) {
-      // Preserve the read, conversion, or downstream cancellation error.
-    }
-  };
-
-  return new ReadableStream<Uint8Array>({
-    async pull(controller) {
-      try {
-        const result = await iterator.next();
-        if (finished) {
-          return;
-        }
-        if (result.done) {
-          controller.close();
-          finished = true;
-          return;
-        }
-        controller.enqueue(compressedChunkToBytes(result.value));
-      } catch (error) {
-        cancelIterator();
-        throw error;
-      }
-    },
-    cancel() {
-      cancelIterator();
-    },
-  });
-}
-
-function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
-  if (!signal) {
-    return promise;
-  }
-  if (signal.aborted) {
-    return Promise.reject(abortReason(signal));
-  }
-
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => {
-      signal.removeEventListener("abort", onAbort);
-      reject(abortReason(signal));
-    };
-    signal.addEventListener("abort", onAbort, { once: true });
-    promise.then(
-      (value) => {
-        signal.removeEventListener("abort", onAbort);
-        resolve(value);
-      },
-      (error: unknown) => {
-        signal.removeEventListener("abort", onAbort);
-        reject(error instanceof Error ? error : new Error("compressed response body read failed"));
-      },
-    );
-  });
-}
-
-function abortReason(signal: AbortSignal): Error {
-  return signal.reason instanceof Error
-    ? signal.reason
-    : new Error("compressed response body read was cancelled");
-}
-
 function concatBytes(chunks: readonly Uint8Array[]): Uint8Array {
   const size = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
   const bytes = new Uint8Array(size);
@@ -294,6 +188,12 @@ function concatBytes(chunks: readonly Uint8Array[]): Uint8Array {
     offset += chunk.byteLength;
   }
   return bytes;
+}
+
+function bytesToArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return copy.buffer;
 }
 
 function isTransformableByteBody(body: unknown): body is {

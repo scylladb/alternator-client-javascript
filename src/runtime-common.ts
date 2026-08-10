@@ -19,49 +19,18 @@ import type {
   HttpHandlerOptions,
   RequestHandlerMetadata,
 } from "@smithy/types";
-import type { ResponseDecompressionOptions } from "./compression-shared.js";
 
 type GenericHttpHandler = HttpHandler<Record<string, unknown>>;
-export type ResponseDecompressor = (
-  response: HttpResponse,
-  options?: ResponseDecompressionOptions,
-) => Promise<HttpResponse>;
-const MAX_DISCOVERY_COMPRESSED_RESPONSE_BYTES = 1024 * 1024;
-interface DiscoveryAddressFallback {
-  resolve(hostname: string, options?: { timeoutMs?: number; priority?: boolean }): Promise<readonly string[]>;
-  handle(
-    request: HttpRequest,
-    address: string,
-    options?: HttpHandlerOptions,
-  ): Promise<{ response: HttpResponse }>;
-}
+export type ResponseDecompressor = (response: HttpResponse) => Promise<HttpResponse>;
 
 class ResponseCompressionHttpHandler implements GenericHttpHandler {
   readonly metadata: RequestHandlerMetadata;
-  readonly discoveryAddressFallback: DiscoveryAddressFallback | undefined;
 
   constructor(
     private readonly delegate: GenericHttpHandler,
     private readonly decompressResponse: ResponseDecompressor,
   ) {
     this.metadata = delegate.metadata ?? { handlerProtocol: "http/1.1" };
-    const addressFallback = (delegate as GenericHttpHandler & {
-      discoveryAddressFallback?: DiscoveryAddressFallback;
-    }).discoveryAddressFallback;
-    this.discoveryAddressFallback = addressFallback
-      ? {
-          resolve: (hostname, options) => addressFallback.resolve(hostname, options),
-          handle: async (request, address, options) => {
-            const result = await addressFallback.handle(request, address, options);
-            return {
-              response: await this.decompressResponse(
-                result.response,
-                decompressionOptions(request, options),
-              ),
-            };
-          },
-        }
-      : undefined;
   }
 
   async handle(
@@ -70,10 +39,7 @@ class ResponseCompressionHttpHandler implements GenericHttpHandler {
   ): Promise<{ response: HttpResponse }> {
     const result = await this.delegate.handle(request, options);
     return {
-      response: await this.decompressResponse(
-        result.response,
-        decompressionOptions(request, options),
-      ),
+      response: await this.decompressResponse(result.response),
     };
   }
 
@@ -91,31 +57,6 @@ class ResponseCompressionHttpHandler implements GenericHttpHandler {
   httpHandlerConfigs(): Record<string, unknown> {
     return this.delegate.httpHandlerConfigs();
   }
-}
-
-function decompressionOptions(
-  request: HttpRequest,
-  options: HttpHandlerOptions | undefined,
-): ResponseDecompressionOptions {
-  return {
-    ...(isPlatformAbortSignal(options?.abortSignal)
-      ? { signal: options.abortSignal }
-      : {}),
-    ...(request.path === "/localnodes"
-      ? { maxCompressedBytes: MAX_DISCOVERY_COMPRESSED_RESPONSE_BYTES }
-      : {}),
-  };
-}
-
-function isPlatformAbortSignal(signal: HttpHandlerOptions["abortSignal"]): signal is AbortSignal {
-  return (
-    typeof signal === "object" &&
-    signal !== null &&
-    "addEventListener" in signal &&
-    typeof signal.addEventListener === "function" &&
-    "removeEventListener" in signal &&
-    typeof signal.removeEventListener === "function"
-  );
 }
 
 export function withResponseCompression(

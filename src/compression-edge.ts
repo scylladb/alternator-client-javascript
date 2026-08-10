@@ -18,9 +18,7 @@ import type { HttpResponse } from "@smithy/protocol-http";
 import { bodyToBytes } from "./body.js";
 import {
   bodyToReadableStream,
-  compressedChunkToBytes,
   mapCompressedResponse,
-  type ResponseDecompressionOptions,
 } from "./compression-shared.js";
 import type { CompressedBody } from "./compression-types.js";
 import type {
@@ -59,107 +57,18 @@ export async function compressBody(
   };
 }
 
-export async function decompressResponse(
-  response: HttpResponse,
-  options?: ResponseDecompressionOptions,
-): Promise<HttpResponse> {
-  return mapCompressedResponse(response, decompressWebResponseBody, options);
+export async function decompressResponse(response: HttpResponse): Promise<HttpResponse> {
+  return mapCompressedResponse(response, decompressWebResponseBody);
 }
 
 async function decompressWebResponseBody(
   body: unknown,
   encoding: AlternatorResponseCompressionAlgorithm,
-  options: ResponseDecompressionOptions = {},
 ): Promise<unknown> {
   if (typeof DecompressionStream === "undefined") {
     throw new Error("response compression requires DecompressionStream support in edge runtime");
   }
 
-  const source = await bodyToReadableStream(body, options);
-  const pipeOptions = options.signal ? { signal: options.signal } : undefined;
-  const boundedStream = Number.isFinite(options.maxCompressedBytes)
-    ? compressedInputLimiter(source, options.maxCompressedBytes!)
-    : cancellationSafeReadableStream(source);
-  return boundedStream.pipeThrough(new DecompressionStream(encoding), pipeOptions);
-}
-
-function cancellationSafeReadableStream(source: ReadableStream): ReadableStream<unknown> {
-  return readerBackedReadableStream(source, (chunk) => chunk);
-}
-
-function compressedInputLimiter(source: ReadableStream, maxBytes: number): ReadableStream<Uint8Array> {
-  let size = 0;
-  return readerBackedReadableStream(source, (chunk) => {
-    const bytes = compressedChunkToBytes(chunk);
-    size += bytes.byteLength;
-    if (size > maxBytes) {
-      throw new Error(`compressed response body exceeds ${maxBytes} bytes`);
-    }
-    return bytes;
-  });
-}
-
-function readerBackedReadableStream<T>(
-  source: ReadableStream,
-  transform: (chunk: unknown) => T,
-): ReadableStream<T> {
-  const reader = source.getReader();
-  let finished = false;
-  let released = false;
-
-  const release = () => {
-    if (released) {
-      return;
-    }
-    try {
-      reader.releaseLock();
-      released = true;
-    } catch (_error) {
-      // A pending read will retry the release when it settles after cancel().
-    }
-  };
-
-  const cancelReader = (reason: unknown) => {
-    try {
-      const cancellation = reader.cancel(reason);
-      void cancellation.catch(() => undefined);
-    } catch (_error) {
-      // Preserve the downstream cancellation or transformation error.
-    }
-  };
-
-  return new ReadableStream<T>({
-    async pull(controller) {
-      try {
-        const result = await reader.read();
-        if (finished) {
-          release();
-          return;
-        }
-        if (result.done) {
-          finished = true;
-          release();
-          controller.close();
-          return;
-        }
-        controller.enqueue(transform(result.value));
-      } catch (error) {
-        if (finished) {
-          release();
-          return;
-        }
-        finished = true;
-        cancelReader(error);
-        release();
-        controller.error(error);
-      }
-    },
-    cancel(reason) {
-      if (!finished) {
-        finished = true;
-        cancelReader(reason);
-      }
-      release();
-    },
-  });
+  const stream = await bodyToReadableStream(body);
+  return stream.pipeThrough(new DecompressionStream(encoding));
 }

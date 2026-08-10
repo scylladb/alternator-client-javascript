@@ -16,7 +16,6 @@
 
 import { FetchHttpHandler } from "@smithy/fetch-http-handler";
 import type { HttpHandlerUserInput } from "@smithy/protocol-http";
-import type { FetchHttpHandlerOptions } from "@smithy/types";
 import { compressBody, decompressResponse } from "./compression-edge.js";
 import { withResponseCompression } from "./runtime-common.js";
 import type {
@@ -74,20 +73,8 @@ function createRequestHandler(
     );
   }
 
-  const configuredFetch = config.connection && "fetch" in config.connection
-    ? config.connection.fetch
-    : undefined;
-  const configuredRequestInit = configuredFetch?.requestInit;
-  const fetchOptions: FetchHttpHandlerOptions = {
-    ...configuredFetch,
-    requestInit: (request) => {
-      const requestInit = configuredRequestInit?.(request) ?? {};
-      if (request.path !== "/localnodes") {
-        return requestInit;
-      }
-      const { signal: _configuredSignal, ...discoveryRequestInit } = requestInit;
-      return { ...discoveryRequestInit, redirect: "manual" };
-    },
+  const fetchOptions = {
+    ...(config.connection && "fetch" in config.connection ? config.connection.fetch : undefined),
   };
   if (config.connection?.timeouts?.requestMs !== undefined) {
     fetchOptions.requestTimeout = config.connection.timeouts.requestMs;

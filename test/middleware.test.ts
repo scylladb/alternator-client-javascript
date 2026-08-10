@@ -118,45 +118,6 @@ describe("Alternator middleware", () => {
     ]);
   });
 
-  it("refreshes through the original seed after a learned node fails", async () => {
-    let recovering = false;
-    const handler = new RecordingHandler((request) => {
-      if (request.path === "/localnodes") {
-        if (!recovering) {
-          return ["old-node"];
-        }
-        return request.hostname === "seed"
-          ? ["new-node"]
-          : jsonResponse({ error: "unavailable" }, 503);
-      }
-      if (recovering && request.hostname === "old-node") {
-        return jsonResponse({ __type: "InternalServerError", message: "unavailable" }, 500);
-      }
-      return { TableNames: [] };
-    });
-    const client = new AlternatorDynamoDBClient({
-      seeds: ["seed"],
-      requestHandler: handler,
-      discovery: { background: false },
-      maxAttempts: 2,
-    });
-
-    try {
-      await client.alternator.refreshNodes();
-      recovering = true;
-      // If request-wide attempt identity is lost when recovery rebuilds the
-      // plan, this value deliberately selects the stale LKG endpoint again.
-      vi.spyOn(Math, "random").mockReturnValue(0.99);
-
-      await expect(client.send(new ListTablesCommand({}))).resolves.toMatchObject({ TableNames: [] });
-      expect(commandRequests(handler).map(({ hostname }) => hostname)).toEqual(["old-node", "new-node"]);
-      expect(client.alternator.nodes().map(({ host }) => host)).toEqual(["new-node", "old-node"]);
-    } finally {
-      vi.restoreAllMocks();
-      client.destroy();
-    }
-  });
-
   it("keeps SigV4 signing when credentials are provided", async () => {
     const handler = new RecordingHandler(() => ({ TableNames: [] }));
     const client = new AlternatorDynamoDBClient({
