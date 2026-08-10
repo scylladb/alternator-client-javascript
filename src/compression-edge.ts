@@ -75,15 +75,34 @@ async function decompressWebResponseBody(
     throw new Error("response compression requires DecompressionStream support in edge runtime");
   }
 
-  const stream = cancellationSafeReadableStream(await bodyToReadableStream(body, options));
+  const source = await bodyToReadableStream(body, options);
   const pipeOptions = options.signal ? { signal: options.signal } : undefined;
   const boundedStream = Number.isFinite(options.maxCompressedBytes)
-    ? stream.pipeThrough(compressedInputLimiter(options.maxCompressedBytes!), pipeOptions)
-    : stream;
+    ? compressedInputLimiter(source, options.maxCompressedBytes!)
+    : cancellationSafeReadableStream(source);
   return boundedStream.pipeThrough(new DecompressionStream(encoding), pipeOptions);
 }
 
 function cancellationSafeReadableStream(source: ReadableStream): ReadableStream<unknown> {
+  return readerBackedReadableStream(source, (chunk) => chunk);
+}
+
+function compressedInputLimiter(source: ReadableStream, maxBytes: number): ReadableStream<Uint8Array> {
+  let size = 0;
+  return readerBackedReadableStream(source, (chunk) => {
+    const bytes = compressedChunkToBytes(chunk);
+    size += bytes.byteLength;
+    if (size > maxBytes) {
+      throw new Error(`compressed response body exceeds ${maxBytes} bytes`);
+    }
+    return bytes;
+  });
+}
+
+function readerBackedReadableStream<T>(
+  source: ReadableStream,
+  transform: (chunk: unknown) => T,
+): ReadableStream<T> {
   const reader = source.getReader();
   let finished = false;
   let released = false;
@@ -100,7 +119,16 @@ function cancellationSafeReadableStream(source: ReadableStream): ReadableStream<
     }
   };
 
-  return new ReadableStream<unknown>({
+  const cancelReader = (reason: unknown) => {
+    try {
+      const cancellation = reader.cancel(reason);
+      void cancellation.catch(() => undefined);
+    } catch (_error) {
+      // Preserve the downstream cancellation or transformation error.
+    }
+  };
+
+  return new ReadableStream<T>({
     async pull(controller) {
       try {
         const result = await reader.read();
@@ -114,13 +142,14 @@ function cancellationSafeReadableStream(source: ReadableStream): ReadableStream<
           controller.close();
           return;
         }
-        controller.enqueue(result.value);
+        controller.enqueue(transform(result.value));
       } catch (error) {
         if (finished) {
           release();
           return;
         }
         finished = true;
+        cancelReader(error);
         release();
         controller.error(error);
       }
@@ -128,28 +157,9 @@ function cancellationSafeReadableStream(source: ReadableStream): ReadableStream<
     cancel(reason) {
       if (!finished) {
         finished = true;
-        try {
-          const cancellation = reader.cancel(reason);
-          void cancellation.catch(() => undefined);
-        } catch (_error) {
-          // Preserve the downstream cancellation reason.
-        }
+        cancelReader(reason);
       }
       release();
-    },
-  });
-}
-
-function compressedInputLimiter(maxBytes: number): TransformStream<unknown, Uint8Array> {
-  let size = 0;
-  return new TransformStream<unknown, Uint8Array>({
-    transform(chunk, controller) {
-      const bytes = compressedChunkToBytes(chunk);
-      size += bytes.byteLength;
-      if (size > maxBytes) {
-        throw new Error(`compressed response body exceeds ${maxBytes} bytes`);
-      }
-      controller.enqueue(bytes);
     },
   });
 }

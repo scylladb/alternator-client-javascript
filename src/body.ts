@@ -239,7 +239,7 @@ function assertBodySize(size: number, maxBytes: number): void {
 function isTransformableBody(body: unknown): body is { transformToString(): Promise<string> } {
   return (
     typeof body === "object" &&
-    body !== null &&
+    !!body &&
     "transformToString" in body &&
     typeof (body as { transformToString?: unknown }).transformToString === "function"
   );
@@ -248,7 +248,7 @@ function isTransformableBody(body: unknown): body is { transformToString(): Prom
 function isReadableStreamLike(body: unknown): body is ReadableStream {
   return (
     typeof body === "object" &&
-    body !== null &&
+    !!body &&
     "getReader" in body &&
     typeof (body as { getReader?: unknown }).getReader === "function"
   );
@@ -257,7 +257,7 @@ function isReadableStreamLike(body: unknown): body is ReadableStream {
 function isAsyncIterable(body: unknown): body is AsyncIterable<unknown> {
   return (
     typeof body === "object" &&
-    body !== null &&
+    !!body &&
     Symbol.asyncIterator in body &&
     typeof (body as { [Symbol.asyncIterator]?: unknown })[Symbol.asyncIterator] === "function"
   );

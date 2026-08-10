@@ -18,6 +18,7 @@ import { describe, expect, it, vi } from "vitest";
 import { AlternatorDynamoDBClient, routing } from "../src/index.js";
 import { AlternatorDynamoDBClient as EdgeAlternatorDynamoDBClient } from "../src/edge.js";
 import { bodyToString } from "../src/body.js";
+import { decompressResponse as decompressEdgeResponse } from "../src/compression-edge.js";
 import { bodyToReadableStream } from "../src/compression-shared.js";
 import { RecordingHandler } from "./helpers.js";
 import { jsonResponse } from "./helpers.js";
@@ -113,6 +114,36 @@ describe("Alternator discovery", () => {
     await expect(reader.read()).rejects.toThrow("compressed response body chunk is not readable");
     await vi.waitFor(() => expect(finalizations).toBe(1));
     reader.releaseLock();
+  });
+
+  it("cancels and unlocks an oversized compressed edge response", async () => {
+    const compressed = gzipSync("[]");
+    let bodyCancelled = false;
+    const compressedBody = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(compressed);
+      },
+      cancel() {
+        bodyCancelled = true;
+      },
+    });
+    const maxCompressedBytes = compressed.byteLength - 1;
+    const response = await decompressEdgeResponse(
+      new HttpResponse({
+        statusCode: 200,
+        headers: { "content-encoding": "gzip" },
+        body: compressedBody,
+      }),
+      { maxCompressedBytes },
+    );
+
+    await expect(new Response(response.body as ReadableStream).arrayBuffer()).rejects.toThrow(
+      `compressed response body exceeds ${maxCompressedBytes} bytes`,
+    );
+    await vi.waitFor(() => {
+      expect(bodyCancelled).toBe(true);
+      expect(compressedBody.locked).toBe(false);
+    });
   });
 
   it("refreshes live nodes from /localnodes", async () => {
