@@ -16,7 +16,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 import { SeededRandom } from "../src/seeded-random.js";
-import { AlternatorQueryPlan, firstNodeWithSeed } from "../src/query-plan.js";
+import { AlternatorQueryPlan, firstNodeWithSeed, sortNodes } from "../src/query-plan.js";
 import type { AlternatorNode } from "../src/types.js";
 
 describe("AlternatorQueryPlan", () => {
@@ -44,6 +44,24 @@ describe("AlternatorQueryPlan", () => {
     expect(plan.next()?.host).toBe("node-a");
     expect(plan.next()?.host).toBe("node-c");
     expect(plan.next()).toBeUndefined();
+  });
+
+  it("tries preferred nodes in order, then remaining nodes in sorted order", () => {
+    const nodes = testNodes(["node-c", "node-a", "node-d", "node-b"]);
+    const preferred = [
+      nodes.find((node) => node.host === "node-d"),
+      nodes.find((node) => node.host === "node-b"),
+    ].filter((node): node is AlternatorNode => node !== undefined);
+    const plan = new AlternatorQueryPlan(nodes, [], preferred, true);
+
+    expect(takeHosts(plan, nodes.length)).toEqual(["node-d", "node-b", "node-a", "node-c"]);
+    expect(plan.next()).toBeUndefined();
+  });
+
+  it("sorts canonical node addresses by UTF-8 bytes", () => {
+    const nodes = testNodes(["node-a", "[::1]", "10.0.0.1"]);
+
+    expect(sortNodes(nodes).map((node) => node.host)).toEqual(["10.0.0.1", "[::1]", "node-a"]);
   });
 
   it("matches seeded raw query plan vectors", () => {

@@ -307,11 +307,12 @@ the same Murmur3 format as Alternator affinity routing. The hash seeds a
 deterministic query plan over lexicographically sorted node URLs, so the same
 partition key selects the same first node. In `any-write` mode,
 `BatchWriteItem` uses voting: each usable write candidate votes for its seeded
-first node, a unique majority becomes the preferred node, and ties fall back to
-the normal query plan. If partition-key metadata is missing and
+first node. Voted coordinators are tried by vote count descending, ties use
+canonical node-address order, and zero-vote live coordinators follow in
+canonical order. The client falls back to the normal query plan only when no
+candidate can vote. If one table lacks partition-key metadata and
 `autoDiscoverPartitionKeys` is enabled, the client starts a background
-`DescribeTable` lookup and falls back to the normal query plan for the current
-request.
+`DescribeTable` lookup for that table while other usable tables can still vote.
 
 Per request, the client creates a lazy node query plan. Retries can consume the
 next node from that plan, so active nodes are tried without repeating until the
