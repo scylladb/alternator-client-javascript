@@ -427,10 +427,15 @@ describe("Alternator middleware", () => {
     expect(headers["content-type"]).toBeUndefined();
   });
 
-  it("routes matching keys to the same node when key affinity is enabled", async () => {
+  it("keeps retry query plans request-scoped when AWS middleware caching is enabled", async () => {
+    let commandAttempts = 0;
     const handler = new RecordingHandler((request) => {
       if (request.path === "/localnodes") {
-        return ["node-a", "node-b", "node-c"];
+        return ["node-a", "node-b"];
+      }
+      commandAttempts += 1;
+      if (commandAttempts === 1) {
+        return jsonResponse({ __type: "InternalServerError", message: "retry" }, 500);
       }
       return {};
     });
@@ -438,6 +443,8 @@ describe("Alternator middleware", () => {
       seeds: ["seed"],
       requestHandler: handler,
       discovery: { background: false },
+      cacheMiddleware: true,
+      maxAttempts: 2,
       keyRouteAffinity: {
         mode: "any-write",
         partitionKeys: {
@@ -447,21 +454,49 @@ describe("Alternator middleware", () => {
     });
 
     await client.alternator.refreshNodes();
-    await client.send(
-      new PutItemCommand({
-        TableName: "users",
-        Item: { id: { S: "same" } },
-      }),
+    let middlewareResolutions = 0;
+    client.middlewareStack.add(
+      (next) => {
+        middlewareResolutions += 1;
+        return next;
+      },
+      {
+        step: "initialize",
+        name: "countMiddlewareResolutions",
+      },
     );
-    await client.send(
-      new PutItemCommand({
-        TableName: "users",
-        Item: { id: { S: "same" } },
-      }),
-    );
+    const rebuildArguments: FinalizeRequestMiddleware<ServiceInputTypes, ServiceOutputTypes> =
+      (next) => (args) => next({
+        input: args.input,
+        request: HttpRequest.isInstance(args.request)
+          ? HttpRequest.clone(args.request)
+          : args.request,
+      });
+    client.middlewareStack.addRelativeTo(rebuildArguments, {
+      relation: "before",
+      toMiddleware: "alternatorRequestMiddleware",
+      name: "rebuildFinalizeArguments",
+    });
+    const command = new PutItemCommand({
+      TableName: "users",
+      Item: { id: { S: "same" } },
+    });
 
-    const [first, second] = commandRequests(handler);
-    expect(first?.hostname).toBe(second?.hostname);
+    await client.send(command);
+    await client.send(command);
+
+    const [firstAttempt, retryAttempt, nextSend] = commandRequests(handler);
+    expect(firstAttempt?.hostname).not.toBe(retryAttempt?.hostname);
+    expect(nextSend?.hostname).toBe(firstAttempt?.hostname);
+    expect(firstAttempt?.headers["amz-sdk-invocation-id"]).toBe(
+      retryAttempt?.headers["amz-sdk-invocation-id"],
+    );
+    expect(nextSend?.headers["amz-sdk-invocation-id"]).not.toBe(
+      firstAttempt?.headers["amz-sdk-invocation-id"],
+    );
+    expect(firstAttempt?.headers["x-scylladb-alternator-invocation-id"]).toBeUndefined();
+    expect(middlewareResolutions).toBe(1);
+    expect(client.config.cacheMiddleware).toBe(true);
     expect(client.alternator.partitionKey("users")).toBe("id");
   });
 });

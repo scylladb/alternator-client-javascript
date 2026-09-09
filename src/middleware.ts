@@ -15,7 +15,11 @@
  */
 
 import { HttpRequest } from "@smithy/protocol-http";
-import type { FinalizeRequestMiddleware, HandlerExecutionContext } from "@smithy/types";
+import type {
+  BuildMiddleware,
+  FinalizeRequestMiddleware,
+  HandlerExecutionContext,
+} from "@smithy/types";
 import { applyResponseEncodingHeaders } from "./compression-shared.js";
 import { hostForUrl } from "./config.js";
 import type { AlternatorDiscovery } from "./discovery.js";
@@ -25,13 +29,68 @@ import type { AlternatorNode, NormalizedAlternatorConfig } from "./types.js";
 import { applyUserAgent } from "./user-agent.js";
 import type { AlternatorBodyCompressor } from "./compression-types.js";
 
-const queryPlanKey = "__alternatorQueryPlan";
+const invocationIdHeader = "x-scylladb-alternator-invocation-id";
+
+interface AlternatorInvocationState {
+  queryPlan?: AlternatorQueryPlan;
+  readonly requests: Set<object>;
+}
+
+export interface AlternatorInvocationTracker {
+  nextId: number;
+  readonly statesById: Map<string, AlternatorInvocationState>;
+  readonly statesByRequest: WeakMap<object, AlternatorInvocationState>;
+}
 
 export interface AlternatorMiddlewareOptions {
   discovery: AlternatorDiscovery;
   config: NormalizedAlternatorConfig;
   keyAffinity: KeyRouteAffinityPlanner;
   compressBody: AlternatorBodyCompressor;
+  invocationTracker: AlternatorInvocationTracker;
+}
+
+export function createAlternatorInvocationTracker(): AlternatorInvocationTracker {
+  return {
+    nextId: 0,
+    statesById: new Map(),
+    statesByRequest: new WeakMap(),
+  };
+}
+
+export function createAlternatorInvocationMiddleware<
+  Input extends object,
+  Output extends object,
+>(tracker: AlternatorInvocationTracker): BuildMiddleware<Input, Output> {
+  return (next) => async (args) => {
+    if (!HttpRequest.isInstance(args.request)) {
+      return next(args);
+    }
+
+    const id = `alternator-${tracker.nextId += 1}`;
+    const request = HttpRequest.clone(args.request);
+    request.headers = {
+      ...removeHeaders(request.headers, [invocationIdHeader]),
+      [invocationIdHeader]: id,
+    };
+    const state = createInvocationState();
+    tracker.statesById.set(id, state);
+    tracker.statesByRequest.set(request, state);
+    state.requests.add(request);
+
+    try {
+      return await next({
+        ...args,
+        request,
+      });
+    } finally {
+      tracker.statesById.delete(id);
+      for (const trackedRequest of state.requests) {
+        tracker.statesByRequest.delete(trackedRequest);
+      }
+      state.requests.clear();
+    }
+  };
 }
 
 export function createAlternatorRequestMiddleware<Input extends object, Output extends object>({
@@ -39,6 +98,7 @@ export function createAlternatorRequestMiddleware<Input extends object, Output e
   config,
   keyAffinity,
   compressBody,
+  invocationTracker,
 }: AlternatorMiddlewareOptions): FinalizeRequestMiddleware<Input, Output> {
   return (next, context) => async (args) => {
     if (!HttpRequest.isInstance(args.request)) {
@@ -47,7 +107,13 @@ export function createAlternatorRequestMiddleware<Input extends object, Output e
 
     await discovery.refreshIfDue();
 
-    const node = nextNodeForAttempt(context, args.input, discovery, keyAffinity);
+    const node = nextNodeForAttempt(
+      invocationState(args.request, invocationTracker),
+      context,
+      args.input,
+      discovery,
+      keyAffinity,
+    );
     if (!node) {
       throw new Error("Alternator query plan exhausted");
     }
@@ -57,7 +123,7 @@ export function createAlternatorRequestMiddleware<Input extends object, Output e
     request.hostname = hostForUrl(node.host);
     request.port = node.port;
     request.headers = {
-      ...request.headers,
+      ...removeHeaders(request.headers, [invocationIdHeader]),
       host: hostHeader(node.host, node.port),
     };
 
@@ -120,26 +186,56 @@ export function createAlternatorPostSigningMiddleware<Input extends object, Outp
 }
 
 function nextNodeForAttempt<Input extends object>(
+  state: AlternatorInvocationState,
   context: HandlerExecutionContext,
   input: Input,
   discovery: AlternatorDiscovery,
   keyAffinity: KeyRouteAffinityPlanner,
 ): AlternatorNode | undefined {
-  const contextRecord = context as HandlerExecutionContext & {
-    [queryPlanKey]?: AlternatorQueryPlan;
-  };
-
-  if (!contextRecord[queryPlanKey]) {
-    contextRecord[queryPlanKey] = createQueryPlan(context, input, discovery, keyAffinity);
+  if (!state.queryPlan) {
+    state.queryPlan = createQueryPlan(context, input, discovery, keyAffinity);
   }
 
-  const node = contextRecord[queryPlanKey].next();
+  const node = state.queryPlan.next();
   if (node) {
     return node;
   }
 
-  contextRecord[queryPlanKey] = createQueryPlan(context, input, discovery, keyAffinity);
-  return contextRecord[queryPlanKey].next();
+  state.queryPlan = createQueryPlan(context, input, discovery, keyAffinity);
+  return state.queryPlan.next();
+}
+
+function invocationState(
+  request: HttpRequest,
+  tracker: AlternatorInvocationTracker,
+): AlternatorInvocationState {
+  const requestState = tracker.statesByRequest.get(request);
+  if (requestState) {
+    const invocationId = headerValue(request.headers, invocationIdHeader);
+    if (invocationId !== undefined) {
+      tracker.statesById.set(invocationId, requestState);
+    }
+    requestState.requests.add(request);
+    return requestState;
+  }
+
+  const invocationId = headerValue(request.headers, invocationIdHeader);
+  let state = invocationId === undefined
+    ? undefined
+    : tracker.statesById.get(invocationId);
+  state ??= createInvocationState();
+  if (invocationId !== undefined) {
+    tracker.statesById.set(invocationId, state);
+  }
+  tracker.statesByRequest.set(request, state);
+  state.requests.add(request);
+  return state;
+}
+
+function createInvocationState(): AlternatorInvocationState {
+  return {
+    requests: new Set(),
+  };
 }
 
 function createQueryPlan<Input extends object>(
@@ -184,6 +280,16 @@ function removeHeaders(
   }
 
   return nextHeaders;
+}
+
+function headerValue(headers: Record<string, string | undefined>, name: string): string | undefined {
+  const lowerName = name.toLowerCase();
+  for (const [headerName, value] of Object.entries(headers)) {
+    if (headerName.toLowerCase() === lowerName) {
+      return value;
+    }
+  }
+  return undefined;
 }
 
 async function maybeCompressRequest(
