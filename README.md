@@ -160,8 +160,8 @@ receives an encoded response.
 ```ts
 new AlternatorDynamoDBClient({
   seeds: ["scylla-0.internal"],
-  scheme: "http",
-  port: 8080,
+  scheme: "https",
+  port: 8043,
   routing: routing.cluster(),
   logger: console,
 
