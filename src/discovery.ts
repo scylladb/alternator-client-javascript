@@ -29,11 +29,21 @@ interface DiscoveryRequestHandler {
 type RackDatacenterSupport = "supported" | "unsupported" | "unknown";
 type RackDatacenterProbeKind = "datacenter" | "rack";
 
+interface DiscoveryDeadlineContext {
+  referenced: boolean;
+  readonly timers: Set<ReturnType<typeof setTimeout>>;
+}
+
+interface InFlightRefresh {
+  readonly promise: Promise<AlternatorNode[]>;
+  readonly deadlines: DiscoveryDeadlineContext;
+}
+
 export class AlternatorDiscovery {
   private liveHosts: string[];
   private refreshTimer: ReturnType<typeof setInterval> | undefined;
   private lastRefreshAttempt = 0;
-  private inFlightRefresh: Promise<AlternatorNode[]> | undefined;
+  private inFlightRefresh: InFlightRefresh | undefined;
 
   constructor(
     private readonly config: NormalizedAlternatorConfig,
@@ -42,7 +52,7 @@ export class AlternatorDiscovery {
     this.liveHosts = [...config.seeds];
     if (config.runtime === "node" && config.discovery.background && config.discovery.refreshIntervalMs > 0) {
       this.refreshTimer = setInterval(() => {
-        this.refreshLiveNodes().catch(() => undefined);
+        this.startRefresh(false).catch(() => undefined);
       }, config.discovery.refreshIntervalMs);
       this.refreshTimer.unref?.();
     }
@@ -57,15 +67,27 @@ export class AlternatorDiscovery {
   }
 
   async refreshLiveNodes(): Promise<AlternatorNode[]> {
+    return this.startRefresh(true);
+  }
+
+  private async startRefresh(referenced: boolean): Promise<AlternatorNode[]> {
     if (this.inFlightRefresh) {
-      return this.inFlightRefresh;
+      if (referenced) {
+        referenceDiscoveryDeadlines(this.inFlightRefresh.deadlines);
+      }
+      return this.inFlightRefresh.promise;
     }
 
     this.lastRefreshAttempt = Date.now();
-    this.inFlightRefresh = this.refreshLiveNodesOnce().finally(() => {
+    const deadlines: DiscoveryDeadlineContext = {
+      referenced,
+      timers: new Set(),
+    };
+    const promise = this.refreshLiveNodesOnce(deadlines).finally(() => {
       this.inFlightRefresh = undefined;
     });
-    return this.inFlightRefresh;
+    this.inFlightRefresh = { promise, deadlines };
+    return promise;
   }
 
   async refreshIfDue(): Promise<void> {
@@ -85,12 +107,15 @@ export class AlternatorDiscovery {
     return datacenterSupport === "supported" && rackSupport === "supported";
   }
 
-  private async probeRackDatacenterSupport(kind: RackDatacenterProbeKind): Promise<RackDatacenterSupport> {
+  private async probeRackDatacenterSupport(
+    kind: RackDatacenterProbeKind,
+    deadlines?: DiscoveryDeadlineContext,
+  ): Promise<RackDatacenterSupport> {
     const probe = missingScopeProbe(kind);
 
     for (const host of this.candidateHosts()) {
       try {
-        const nodes = await this.fetchLocalNodes(host, probe);
+        const nodes = await this.fetchLocalNodes(host, probe, deadlines);
         return nodes.length === 0 ? "supported" : "unsupported";
       } catch {
         continue;
@@ -145,7 +170,7 @@ export class AlternatorDiscovery {
     }
   }
 
-  private async refreshLiveNodesOnce(): Promise<AlternatorNode[]> {
+  private async refreshLiveNodesOnce(deadlines: DiscoveryDeadlineContext): Promise<AlternatorNode[]> {
     const candidates = this.candidateHosts();
     let datacenterSupport: RackDatacenterSupport | undefined;
     let rackSupport: RackDatacenterSupport | undefined;
@@ -154,9 +179,9 @@ export class AlternatorDiscovery {
       try {
         let nodes: string[];
         if (scope.kind === "cluster") {
-          nodes = await this.fetchClusterLocalNodes();
+          nodes = await this.fetchClusterLocalNodes(deadlines);
         } else {
-          datacenterSupport ??= await this.probeRackDatacenterSupport("datacenter");
+          datacenterSupport ??= await this.probeRackDatacenterSupport("datacenter", deadlines);
           if (datacenterSupport === "unsupported") {
             this.config.logger.debug?.("alternator discovery: datacenter query parameters are unsupported", {
               scope: routingScopeLabel(scope),
@@ -164,7 +189,7 @@ export class AlternatorDiscovery {
             continue;
           }
           if (scope.kind === "rack") {
-            rackSupport ??= await this.probeRackDatacenterSupport("rack");
+            rackSupport ??= await this.probeRackDatacenterSupport("rack", deadlines);
             if (rackSupport === "unsupported") {
               this.config.logger.debug?.("alternator discovery: rack query parameters are unsupported", {
                 scope: routingScopeLabel(scope),
@@ -172,7 +197,7 @@ export class AlternatorDiscovery {
               continue;
             }
           }
-          nodes = await this.fetchFirstAvailableLocalNodes(queryForRoutingScope(scope), candidates);
+          nodes = await this.fetchFirstAvailableLocalNodes(queryForRoutingScope(scope), candidates, deadlines);
         }
         if (nodes.length > 0) {
           this.liveHosts = normalizeDiscoveredHosts(nodes);
@@ -193,13 +218,13 @@ export class AlternatorDiscovery {
     return [...new Set([...this.liveHosts, ...this.config.seeds])];
   }
 
-  private async fetchClusterLocalNodes(): Promise<string[]> {
+  private async fetchClusterLocalNodes(deadlines: DiscoveryDeadlineContext): Promise<string[]> {
     const nodes: string[] = [];
     const query: LocalNodesQuery = {};
 
     for (const host of this.config.seeds) {
       try {
-        const discovered = await this.fetchLocalNodes(host, query);
+        const discovered = await this.fetchLocalNodes(host, query, deadlines);
         if (discovered.length > 0) {
           nodes.push(...discovered);
         } else {
@@ -220,12 +245,13 @@ export class AlternatorDiscovery {
   private async fetchFirstAvailableLocalNodes(
     query: LocalNodesQuery,
     candidates: readonly string[] = this.candidateHosts(),
+    deadlines?: DiscoveryDeadlineContext,
   ): Promise<string[]> {
     let lastError: unknown;
     let sawEmptyResponse = false;
     for (const host of candidates) {
       try {
-        const nodes = await this.fetchLocalNodes(host, query);
+        const nodes = await this.fetchLocalNodes(host, query, deadlines);
         if (nodes.length > 0) {
           return nodes;
         }
@@ -249,7 +275,11 @@ export class AlternatorDiscovery {
     throw new Error(lastError === undefined ? "no Alternator seed hosts are available" : errorMessage(lastError));
   }
 
-  private async fetchLocalNodes(host: string, query: LocalNodesQuery): Promise<string[]> {
+  private async fetchLocalNodes(
+    host: string,
+    query: LocalNodesQuery,
+    deadlines?: DiscoveryDeadlineContext,
+  ): Promise<string[]> {
     const request = new HttpRequest({
       protocol: `${this.config.scheme}:`,
       method: "GET",
@@ -295,13 +325,17 @@ export class AlternatorDiscovery {
         destroyResponseBody(responseBody);
         reject(new Error(`/localnodes request timed out after ${timeoutMs} ms`));
       }, timeoutMs);
-      timeout.unref?.();
+      deadlines?.timers.add(timeout);
+      if (deadlines && !deadlines.referenced) {
+        timeout.unref?.();
+      }
     });
 
     try {
       return await Promise.race([fetchNodes(), timeoutPromise]);
     } finally {
       if (timeout) {
+        deadlines?.timers.delete(timeout);
         clearTimeout(timeout);
       }
     }
@@ -314,6 +348,16 @@ export class AlternatorDiscovery {
       port: this.config.port,
       url: nodeUrl(host, this.config),
     };
+  }
+}
+
+function referenceDiscoveryDeadlines(deadlines: DiscoveryDeadlineContext): void {
+  if (deadlines.referenced) {
+    return;
+  }
+  deadlines.referenced = true;
+  for (const timer of deadlines.timers) {
+    timer.ref?.();
   }
 }
 

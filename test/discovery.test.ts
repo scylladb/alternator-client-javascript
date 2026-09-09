@@ -677,6 +677,101 @@ describe("Alternator discovery", () => {
     },
   );
 
+  it("keeps foreground discovery deadline timers referenced", async () => {
+    const timer = setTimeout(() => undefined, 60_000);
+    const timerPrototype = Object.getPrototypeOf(timer) as { unref(): void };
+    clearTimeout(timer);
+    const unref = vi.spyOn(timerPrototype, "unref");
+    const client = new AlternatorDynamoDBClient({
+      seeds: ["seed"],
+      requestHandler: new RecordingHandler(() => new Promise(() => undefined)),
+      discovery: { background: false, timeoutMs: 1 },
+    });
+
+    try {
+      await client.alternator.refreshNodes();
+      expect(unref).not.toHaveBeenCalled();
+    } finally {
+      client.destroy();
+      unref.mockRestore();
+    }
+  });
+
+  it("promotes an unreferenced background discovery deadline when a foreground refresh joins", async () => {
+    const timeoutMs = 31_337;
+    let firstRequestStarted!: () => void;
+    let rejectFirstRequest!: (error: Error) => void;
+    let secondRequestStarted!: () => void;
+    let resolveSecondRequest!: (nodes: string[]) => void;
+    const firstStarted = new Promise<void>((resolve) => {
+      firstRequestStarted = resolve;
+    });
+    const firstResponse = new Promise<never>((_resolve, reject) => {
+      rejectFirstRequest = reject;
+    });
+    const secondStarted = new Promise<void>((resolve) => {
+      secondRequestStarted = resolve;
+    });
+    const secondResponse = new Promise<string[]>((resolve) => {
+      resolveSecondRequest = resolve;
+    });
+    let requestCount = 0;
+    const handler = new RecordingHandler(() => {
+      requestCount += 1;
+      if (requestCount === 1) {
+        firstRequestStarted();
+        return firstResponse;
+      }
+      secondRequestStarted();
+      return secondResponse;
+    });
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    const client = new AlternatorDynamoDBClient({
+      seeds: ["seed-a", "seed-b"],
+      requestHandler: handler,
+      discovery: {
+        background: true,
+        refreshIntervalMs: 1,
+        timeoutMs,
+      },
+    });
+
+    try {
+      await firstStarted;
+      const firstDeadline = setTimeoutSpy.mock.results.find(
+        (_result, index) => setTimeoutSpy.mock.calls[index]?.[1] === timeoutMs,
+      )?.value as ReturnType<typeof setTimeout> | undefined;
+      expect(firstDeadline?.hasRef?.()).toBe(false);
+
+      const foregroundRefresh = client.alternator.refreshNodes();
+      expect(requestCount).toBe(1);
+      expect(firstDeadline?.hasRef?.()).toBe(true);
+
+      rejectFirstRequest(new Error("first seed unavailable"));
+      await secondStarted;
+      const deadlines = setTimeoutSpy.mock.results
+        .filter((_result, index) => setTimeoutSpy.mock.calls[index]?.[1] === timeoutMs)
+        .map((result) => result.value as ReturnType<typeof setTimeout>);
+      expect(deadlines).toHaveLength(2);
+      expect(deadlines[1]?.hasRef?.()).toBe(true);
+
+      resolveSecondRequest(["node-a"]);
+      await expect(foregroundRefresh).resolves.toEqual([
+        {
+          host: "node-a",
+          scheme: "http",
+          port: 8080,
+          url: "http://node-a:8080",
+        },
+      ]);
+    } finally {
+      client.destroy();
+      rejectFirstRequest(new Error("test cleanup"));
+      resolveSecondRequest(["node-a"]);
+      setTimeoutSpy.mockRestore();
+    }
+  });
+
   it("merges HTTP handler options without dropping bounded connection settings", async () => {
     let activeRequests = 0;
     let peakRequests = 0;
