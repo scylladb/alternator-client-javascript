@@ -26,8 +26,14 @@ import type { AwsCredentialIdentity, HttpHandlerOptions } from "@smithy/types";
 import { DEFAULT_REGION, firstEndpointUrl, NO_AUTH_CREDENTIALS, normalizeConfig } from "./config.js";
 import { AlternatorDiscovery } from "./discovery.js";
 import { KeyRouteAffinityPlanner } from "./affinity.js";
-import { createAlternatorPostSigningMiddleware, createAlternatorRequestMiddleware } from "./middleware.js";
+import {
+  createAlternatorInvocationMiddleware,
+  createAlternatorInvocationTracker,
+  createAlternatorPostSigningMiddleware,
+  createAlternatorRequestMiddleware,
+} from "./middleware.js";
 import type { AlternatorBodyCompressor } from "./compression-types.js";
+import type { ConfiguredRequestHandler } from "./runtime-common.js";
 import type { AlternatorDynamoDBClientConfig, AlternatorNode, NormalizedAlternatorConfig } from "./types.js";
 
 export interface AlternatorDynamoDBClientApi {
@@ -43,7 +49,7 @@ export interface AlternatorRuntimePlatform {
   createRequestHandler(
     input: AlternatorDynamoDBClientConfig,
     config: NormalizedAlternatorConfig,
-  ): HttpHandlerUserInput;
+  ): ConfiguredRequestHandler;
   compressBody: AlternatorBodyCompressor;
 }
 
@@ -57,7 +63,10 @@ export abstract class AlternatorDynamoDBClientBase extends DynamoDBClient {
     const alternatorConfig = normalizeConfig(config);
     platform.assertRuntimeSupport(alternatorConfig);
 
-    const requestHandler = platform.createRequestHandler(config, alternatorConfig);
+    const {
+      requestHandler,
+      forwardDiscoveryRequestTimeout,
+    } = platform.createRequestHandler(config, alternatorConfig);
     const dynamoConfig = buildDynamoConfig(config, alternatorConfig, requestHandler);
 
     super(dynamoConfig);
@@ -66,6 +75,7 @@ export abstract class AlternatorDynamoDBClientBase extends DynamoDBClient {
     this.discovery = new AlternatorDiscovery(
       alternatorConfig,
       this.config.requestHandler as HttpHandler,
+      forwardDiscoveryRequestTimeout,
     );
     this.keyAffinity = new KeyRouteAffinityPlanner(
       alternatorConfig.keyRouteAffinity,
@@ -80,12 +90,24 @@ export abstract class AlternatorDynamoDBClientBase extends DynamoDBClient {
       partitionKey: (tableName) => this.keyAffinity.getPartitionKeyName(tableName),
     };
 
+    const invocationTracker = createAlternatorInvocationTracker();
+
+    this.middlewareStack.add(
+      createAlternatorInvocationMiddleware<ServiceInputTypes, ServiceOutputTypes>(invocationTracker),
+      {
+        step: "build",
+        name: "alternatorInvocationMiddleware",
+        override: true,
+      },
+    );
+
     this.middlewareStack.addRelativeTo(
       createAlternatorRequestMiddleware<ServiceInputTypes, ServiceOutputTypes>({
         discovery: this.discovery,
         config: alternatorConfig,
         keyAffinity: this.keyAffinity,
         compressBody: platform.compressBody,
+        invocationTracker,
       }),
       {
         relation: "before",

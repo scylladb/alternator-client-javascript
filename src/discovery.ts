@@ -29,20 +29,41 @@ interface DiscoveryRequestHandler {
 type RackDatacenterSupport = "supported" | "unsupported" | "unknown";
 type RackDatacenterProbeKind = "datacenter" | "rack";
 
+interface DiscoveryDeadlineContext {
+  referenced: boolean;
+  readonly timers: Set<ReturnType<typeof setTimeout>>;
+}
+
+interface InFlightRefresh {
+  readonly promise: Promise<AlternatorNode[]>;
+  readonly deadlines: DiscoveryDeadlineContext;
+}
+
+interface ActiveDiscoveryRequest {
+  readonly abortController: AbortController;
+  readonly cancellation: Promise<never>;
+  readonly cancel: () => void;
+  responseBody: unknown;
+}
+
 export class AlternatorDiscovery {
   private liveHosts: string[];
   private refreshTimer: ReturnType<typeof setInterval> | undefined;
   private lastRefreshAttempt = 0;
-  private inFlightRefresh: Promise<AlternatorNode[]> | undefined;
+  private inFlightRefresh: InFlightRefresh | undefined;
+  private readonly activeDeadlines = new Set<ReturnType<typeof setTimeout>>();
+  private readonly activeRequests = new Set<ActiveDiscoveryRequest>();
+  private destroyed = false;
 
   constructor(
     private readonly config: NormalizedAlternatorConfig,
     private readonly requestHandler: DiscoveryRequestHandler,
+    private readonly forwardRequestTimeoutToHandler: boolean,
   ) {
     this.liveHosts = [...config.seeds];
     if (config.runtime === "node" && config.discovery.background && config.discovery.refreshIntervalMs > 0) {
       this.refreshTimer = setInterval(() => {
-        this.refreshLiveNodes().catch(() => undefined);
+        this.startRefresh(false).catch(() => undefined);
       }, config.discovery.refreshIntervalMs);
       this.refreshTimer.unref?.();
     }
@@ -57,15 +78,27 @@ export class AlternatorDiscovery {
   }
 
   async refreshLiveNodes(): Promise<AlternatorNode[]> {
+    return this.startRefresh(true);
+  }
+
+  private async startRefresh(referenced: boolean): Promise<AlternatorNode[]> {
     if (this.inFlightRefresh) {
-      return this.inFlightRefresh;
+      if (referenced && !this.destroyed) {
+        referenceDiscoveryDeadlines(this.inFlightRefresh.deadlines);
+      }
+      return this.inFlightRefresh.promise;
     }
 
     this.lastRefreshAttempt = Date.now();
-    this.inFlightRefresh = this.refreshLiveNodesOnce().finally(() => {
+    const deadlines: DiscoveryDeadlineContext = {
+      referenced,
+      timers: new Set(),
+    };
+    const promise = this.refreshLiveNodesOnce(deadlines).finally(() => {
       this.inFlightRefresh = undefined;
     });
-    return this.inFlightRefresh;
+    this.inFlightRefresh = { promise, deadlines };
+    return promise;
   }
 
   async refreshIfDue(): Promise<void> {
@@ -85,12 +118,15 @@ export class AlternatorDiscovery {
     return datacenterSupport === "supported" && rackSupport === "supported";
   }
 
-  private async probeRackDatacenterSupport(kind: RackDatacenterProbeKind): Promise<RackDatacenterSupport> {
+  private async probeRackDatacenterSupport(
+    kind: RackDatacenterProbeKind,
+    deadlines?: DiscoveryDeadlineContext,
+  ): Promise<RackDatacenterSupport> {
     const probe = missingScopeProbe(kind);
 
     for (const host of this.candidateHosts()) {
       try {
-        const nodes = await this.fetchLocalNodes(host, probe);
+        const nodes = await this.fetchLocalNodes(host, probe, deadlines);
         return nodes.length === 0 ? "supported" : "unsupported";
       } catch {
         continue;
@@ -139,13 +175,22 @@ export class AlternatorDiscovery {
   }
 
   destroy(): void {
+    this.destroyed = true;
     if (this.refreshTimer) {
       clearInterval(this.refreshTimer);
       this.refreshTimer = undefined;
     }
+    for (const deadline of this.activeDeadlines) {
+      deadline.unref?.();
+    }
+    for (const request of this.activeRequests) {
+      request.abortController.abort();
+      destroyResponseBody(request.responseBody);
+      request.cancel();
+    }
   }
 
-  private async refreshLiveNodesOnce(): Promise<AlternatorNode[]> {
+  private async refreshLiveNodesOnce(deadlines: DiscoveryDeadlineContext): Promise<AlternatorNode[]> {
     const candidates = this.candidateHosts();
     let datacenterSupport: RackDatacenterSupport | undefined;
     let rackSupport: RackDatacenterSupport | undefined;
@@ -154,9 +199,9 @@ export class AlternatorDiscovery {
       try {
         let nodes: string[];
         if (scope.kind === "cluster") {
-          nodes = await this.fetchClusterLocalNodes();
+          nodes = await this.fetchClusterLocalNodes(deadlines);
         } else {
-          datacenterSupport ??= await this.probeRackDatacenterSupport("datacenter");
+          datacenterSupport ??= await this.probeRackDatacenterSupport("datacenter", deadlines);
           if (datacenterSupport === "unsupported") {
             this.config.logger.debug?.("alternator discovery: datacenter query parameters are unsupported", {
               scope: routingScopeLabel(scope),
@@ -164,7 +209,7 @@ export class AlternatorDiscovery {
             continue;
           }
           if (scope.kind === "rack") {
-            rackSupport ??= await this.probeRackDatacenterSupport("rack");
+            rackSupport ??= await this.probeRackDatacenterSupport("rack", deadlines);
             if (rackSupport === "unsupported") {
               this.config.logger.debug?.("alternator discovery: rack query parameters are unsupported", {
                 scope: routingScopeLabel(scope),
@@ -172,7 +217,7 @@ export class AlternatorDiscovery {
               continue;
             }
           }
-          nodes = await this.fetchFirstAvailableLocalNodes(queryForRoutingScope(scope), candidates);
+          nodes = await this.fetchFirstAvailableLocalNodes(queryForRoutingScope(scope), candidates, deadlines);
         }
         if (nodes.length > 0) {
           this.liveHosts = normalizeDiscoveredHosts(nodes);
@@ -193,13 +238,13 @@ export class AlternatorDiscovery {
     return [...new Set([...this.liveHosts, ...this.config.seeds])];
   }
 
-  private async fetchClusterLocalNodes(): Promise<string[]> {
+  private async fetchClusterLocalNodes(deadlines: DiscoveryDeadlineContext): Promise<string[]> {
     const nodes: string[] = [];
     const query: LocalNodesQuery = {};
 
     for (const host of this.config.seeds) {
       try {
-        const discovered = await this.fetchLocalNodes(host, query);
+        const discovered = await this.fetchLocalNodes(host, query, deadlines);
         if (discovered.length > 0) {
           nodes.push(...discovered);
         } else {
@@ -220,12 +265,13 @@ export class AlternatorDiscovery {
   private async fetchFirstAvailableLocalNodes(
     query: LocalNodesQuery,
     candidates: readonly string[] = this.candidateHosts(),
+    deadlines?: DiscoveryDeadlineContext,
   ): Promise<string[]> {
     let lastError: unknown;
     let sawEmptyResponse = false;
     for (const host of candidates) {
       try {
-        const nodes = await this.fetchLocalNodes(host, query);
+        const nodes = await this.fetchLocalNodes(host, query, deadlines);
         if (nodes.length > 0) {
           return nodes;
         }
@@ -249,7 +295,15 @@ export class AlternatorDiscovery {
     throw new Error(lastError === undefined ? "no Alternator seed hosts are available" : errorMessage(lastError));
   }
 
-  private async fetchLocalNodes(host: string, query: LocalNodesQuery): Promise<string[]> {
+  private async fetchLocalNodes(
+    host: string,
+    query: LocalNodesQuery,
+    deadlines?: DiscoveryDeadlineContext,
+  ): Promise<string[]> {
+    if (this.destroyed) {
+      throw new Error("Alternator discovery has been destroyed");
+    }
+
     const request = new HttpRequest({
       protocol: `${this.config.scheme}:`,
       method: "GET",
@@ -263,13 +317,31 @@ export class AlternatorDiscovery {
     });
     const timeoutMs = this.config.discovery.timeoutMs;
     const abortController = new AbortController();
+    let rejectCancellation!: (error: Error) => void;
+    const cancellation = new Promise<never>((_resolve, reject) => {
+      rejectCancellation = reject;
+    });
+    const activeRequest: ActiveDiscoveryRequest = {
+      abortController,
+      cancellation,
+      cancel: () => rejectCancellation(new Error("Alternator discovery has been destroyed")),
+      responseBody: undefined,
+    };
+    this.activeRequests.add(activeRequest);
     let responseBody: unknown;
     const fetchNodes = async (): Promise<string[]> => {
       const response = await this.requestHandler.handle(request, {
-        requestTimeout: timeoutMs,
+        // Built-in handlers use the deadline below so it can be released during
+        // destroy. Custom handlers also receive it for transport-level cleanup.
+        requestTimeout: this.forwardRequestTimeoutToHandler ? timeoutMs : 0,
         abortSignal: abortController.signal,
       });
       responseBody = response.response.body;
+      activeRequest.responseBody = responseBody;
+      if (this.destroyed) {
+        destroyResponseBody(responseBody);
+        throw new Error("Alternator discovery has been destroyed");
+      }
 
       if (response.response.statusCode < 200 || response.response.statusCode >= 300) {
         await drainResponseBody(responseBody, timeoutMs);
@@ -285,7 +357,11 @@ export class AlternatorDiscovery {
     };
 
     if (timeoutMs <= 0) {
-      return fetchNodes();
+      try {
+        return await Promise.race([fetchNodes(), cancellation]);
+      } finally {
+        this.activeRequests.delete(activeRequest);
+      }
     }
 
     let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -295,13 +371,20 @@ export class AlternatorDiscovery {
         destroyResponseBody(responseBody);
         reject(new Error(`/localnodes request timed out after ${timeoutMs} ms`));
       }, timeoutMs);
-      timeout.unref?.();
+      this.activeDeadlines.add(timeout);
+      deadlines?.timers.add(timeout);
+      if (this.destroyed || (deadlines && !deadlines.referenced)) {
+        timeout.unref?.();
+      }
     });
 
     try {
-      return await Promise.race([fetchNodes(), timeoutPromise]);
+      return await Promise.race([fetchNodes(), timeoutPromise, cancellation]);
     } finally {
+      this.activeRequests.delete(activeRequest);
       if (timeout) {
+        this.activeDeadlines.delete(timeout);
+        deadlines?.timers.delete(timeout);
         clearTimeout(timeout);
       }
     }
@@ -314,6 +397,16 @@ export class AlternatorDiscovery {
       port: this.config.port,
       url: nodeUrl(host, this.config),
     };
+  }
+}
+
+function referenceDiscoveryDeadlines(deadlines: DiscoveryDeadlineContext): void {
+  if (deadlines.referenced) {
+    return;
+  }
+  deadlines.referenced = true;
+  for (const timer of deadlines.timers) {
+    timer.ref?.();
   }
 }
 

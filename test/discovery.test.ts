@@ -14,17 +14,23 @@
  * limitations under the License.
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { AlternatorDynamoDBClient, routing } from "../src/index.js";
 import { AlternatorDynamoDBClient as EdgeAlternatorDynamoDBClient } from "../src/edge.js";
 import { RecordingHandler } from "./helpers.js";
 import { ListTablesCommand } from "@aws-sdk/client-dynamodb";
+import {
+  FetchHttpHandler as SmithyFetchHttpHandler,
+  streamCollector as fetchStreamCollector,
+} from "@smithy/fetch-http-handler";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
+import { HttpResponse, type HttpRequest } from "@smithy/protocol-http";
+import type { HttpHandlerOptions } from "@smithy/types";
 import { Agent, createServer, type Server } from "node:http";
 import type { LookupAddress } from "node:dns";
 import type { AddressInfo, LookupFunction } from "node:net";
 import { fileURLToPath } from "node:url";
-import { gzipSync } from "node:zlib";
+import { deflateSync, gzipSync } from "node:zlib";
 
 const missingDatacenterQuery = { dc: "__alternator_client_missing_dc__" };
 const missingRackQuery = { rack: "__alternator_client_missing_rack__" };
@@ -671,7 +677,228 @@ describe("Alternator discovery", () => {
     },
   );
 
-  it("keeps maxSockets bounded during concurrent lazy handler initialization", async () => {
+  it("keeps foreground discovery deadline timers referenced", async () => {
+    const timer = setTimeout(() => undefined, 60_000);
+    const timerPrototype = Object.getPrototypeOf(timer) as { unref(): void };
+    clearTimeout(timer);
+    const unref = vi.spyOn(timerPrototype, "unref");
+    const client = new AlternatorDynamoDBClient({
+      seeds: ["seed"],
+      requestHandler: new RecordingHandler(() => new Promise(() => undefined)),
+      discovery: { background: false, timeoutMs: 1 },
+    });
+
+    try {
+      await client.alternator.refreshNodes();
+      expect(unref).not.toHaveBeenCalled();
+    } finally {
+      client.destroy();
+      unref.mockRestore();
+    }
+  });
+
+  it("promotes an unreferenced background discovery deadline when a foreground refresh joins", async () => {
+    const timeoutMs = 31_337;
+    let firstRequestStarted!: () => void;
+    let rejectFirstRequest!: (error: Error) => void;
+    let secondRequestStarted!: () => void;
+    let resolveSecondRequest!: (nodes: string[]) => void;
+    const firstStarted = new Promise<void>((resolve) => {
+      firstRequestStarted = resolve;
+    });
+    const firstResponse = new Promise<never>((_resolve, reject) => {
+      rejectFirstRequest = reject;
+    });
+    const secondStarted = new Promise<void>((resolve) => {
+      secondRequestStarted = resolve;
+    });
+    const secondResponse = new Promise<string[]>((resolve) => {
+      resolveSecondRequest = resolve;
+    });
+    let requestCount = 0;
+    const handler = new RecordingHandler(() => {
+      requestCount += 1;
+      if (requestCount === 1) {
+        firstRequestStarted();
+        return firstResponse;
+      }
+      secondRequestStarted();
+      return secondResponse;
+    });
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    const client = new AlternatorDynamoDBClient({
+      seeds: ["seed-a", "seed-b"],
+      requestHandler: handler,
+      discovery: {
+        background: true,
+        refreshIntervalMs: 1,
+        timeoutMs,
+      },
+    });
+
+    try {
+      await firstStarted;
+      const firstDeadline = setTimeoutSpy.mock.results.find(
+        (_result, index) => setTimeoutSpy.mock.calls[index]?.[1] === timeoutMs,
+      )?.value as ReturnType<typeof setTimeout> | undefined;
+      expect(firstDeadline?.hasRef?.()).toBe(false);
+
+      const foregroundRefresh = client.alternator.refreshNodes();
+      expect(requestCount).toBe(1);
+      expect(firstDeadline?.hasRef?.()).toBe(true);
+
+      rejectFirstRequest(new Error("first seed unavailable"));
+      await secondStarted;
+      const deadlines = setTimeoutSpy.mock.results
+        .filter((_result, index) => setTimeoutSpy.mock.calls[index]?.[1] === timeoutMs)
+        .map((result) => result.value as ReturnType<typeof setTimeout>);
+      expect(deadlines).toHaveLength(2);
+      expect(deadlines[1]?.hasRef?.()).toBe(true);
+
+      resolveSecondRequest(["node-a"]);
+      await expect(foregroundRefresh).resolves.toEqual([
+        {
+          host: "node-a",
+          scheme: "http",
+          port: 8080,
+          url: "http://node-a:8080",
+        },
+      ]);
+    } finally {
+      client.destroy();
+      rejectFirstRequest(new Error("test cleanup"));
+      resolveSecondRequest(["node-a"]);
+      setTimeoutSpy.mockRestore();
+    }
+  });
+
+  it("releases foreground discovery and stops trying seeds when destroyed", async () => {
+    const timeoutMs = 31_338;
+    let requestStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      requestStarted = resolve;
+    });
+    const response = new Promise<never>(() => undefined);
+    let requestCount = 0;
+    let requestSignal: { readonly aborted: boolean } | undefined;
+    let handlerRequestTimeout: number | undefined;
+    const handler = new RecordingHandler((_request, options) => {
+      requestCount += 1;
+      requestSignal = options?.abortSignal;
+      handlerRequestTimeout = options?.requestTimeout;
+      requestStarted();
+      return response;
+    });
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    const client = new AlternatorDynamoDBClient({
+      seeds: ["seed-a", "seed-b"],
+      requestHandler: handler,
+      discovery: { background: false, timeoutMs },
+    });
+    const refresh = client.alternator.refreshNodes();
+
+    try {
+      await started;
+      const deadline = setTimeoutSpy.mock.results.find(
+        (_result, index) => setTimeoutSpy.mock.calls[index]?.[1] === timeoutMs,
+      )?.value as ReturnType<typeof setTimeout> | undefined;
+      expect(deadline?.hasRef?.()).toBe(true);
+      expect(handlerRequestTimeout).toBe(timeoutMs);
+
+      client.destroy();
+      expect(deadline?.hasRef?.()).toBe(false);
+      expect(requestSignal?.aborted).toBe(true);
+
+      await refresh;
+      expect(requestCount).toBe(1);
+    } finally {
+      client.destroy();
+      setTimeoutSpy.mockRestore();
+    }
+  });
+
+  it("forwards discovery deadlines to callable custom handlers for transport cleanup", async () => {
+    const timeoutMs = 20;
+    const handlerTimeouts: Array<number | undefined> = [];
+    let activeRequests = 0;
+    const handler = Object.assign(
+      () => undefined,
+      {
+        handle: (_request: HttpRequest, options?: HttpHandlerOptions) => {
+          const handlerTimeout = options?.requestTimeout;
+          handlerTimeouts.push(handlerTimeout);
+          activeRequests += 1;
+          if (!handlerTimeout) {
+            return new Promise<never>(() => undefined);
+          }
+          return new Promise<never>((_resolve, reject) => {
+            setTimeout(() => {
+              activeRequests -= 1;
+              reject(new Error("custom handler request timed out"));
+            }, Math.max(1, handlerTimeout - 5));
+          });
+        },
+        updateHttpClientConfig: () => undefined,
+        httpHandlerConfigs: () => ({}),
+        destroy: () => undefined,
+      },
+    );
+    const client = new AlternatorDynamoDBClient({
+      seeds: ["seed"],
+      requestHandler: handler,
+      discovery: { background: false, timeoutMs },
+    });
+
+    try {
+      await client.alternator.refreshNodes();
+      expect(handlerTimeouts).toEqual([timeoutMs]);
+      expect(activeRequests).toBe(0);
+    } finally {
+      client.destroy();
+    }
+  });
+
+  it("unreferences standalone discovery probe deadlines when destroyed", async () => {
+    const timeoutMs = 31_339;
+    let requestStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      requestStarted = resolve;
+    });
+    const response = new Promise<never>(() => undefined);
+    let requestSignal: { readonly aborted: boolean } | undefined;
+    const handler = new RecordingHandler((_request, options) => {
+      requestSignal = options?.abortSignal;
+      requestStarted();
+      return response;
+    });
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    const client = new AlternatorDynamoDBClient({
+      seeds: ["seed"],
+      requestHandler: handler,
+      discovery: { background: false, timeoutMs },
+    });
+    const supportCheck = client.alternator.supportsScopedDiscovery();
+
+    try {
+      await started;
+      const deadline = setTimeoutSpy.mock.results.find(
+        (_result, index) => setTimeoutSpy.mock.calls[index]?.[1] === timeoutMs,
+      )?.value as ReturnType<typeof setTimeout> | undefined;
+      expect(deadline?.hasRef?.()).toBe(true);
+
+      client.destroy();
+      expect(deadline?.hasRef?.()).toBe(false);
+      expect(requestSignal?.aborted).toBe(true);
+
+      await expect(supportCheck).resolves.toBe(false);
+      expect(handler.requests).toHaveLength(1);
+    } finally {
+      client.destroy();
+      setTimeoutSpy.mockRestore();
+    }
+  });
+
+  it("merges HTTP handler options without dropping bounded connection settings", async () => {
     let activeRequests = 0;
     let peakRequests = 0;
     const server = createServer((request, response) => {
@@ -691,6 +918,10 @@ describe("Alternator discovery", () => {
       tls: {
         ca: { file: fileURLToPath(import.meta.url) },
       },
+      requestHandler: {
+        requestTimeout: 1_000,
+        httpAgent: undefined,
+      } as never,
       discovery: { background: false },
       connection: { maxSockets: 1 },
       maxAttempts: 1,
@@ -738,6 +969,278 @@ describe("Alternator discovery", () => {
     } finally {
       client.destroy();
       await close(server);
+    }
+  });
+
+  it("preserves opaque decoded bodies from an explicitly configured Fetch handler", async () => {
+    const decoded = new TextEncoder().encode(JSON.stringify({ TableNames: ["decoded"] }));
+    const LegacyBlob = class Blob {
+      constructor(readonly bytes: Uint8Array) {}
+    };
+    class LegacyFileReader {
+      readyState = 0;
+      result: string | null = null;
+      onloadend: (() => void) | null = null;
+
+      readAsDataURL(blob: InstanceType<typeof LegacyBlob>): void {
+        this.readyState = 2;
+        this.result = `data:application/octet-stream;base64,${Buffer.from(blob.bytes).toString("base64")}`;
+        this.onloadend?.();
+      }
+    }
+    const handle = vi.spyOn(SmithyFetchHttpHandler.prototype, "handle");
+    let client: EdgeAlternatorDynamoDBClient | undefined;
+
+    try {
+      vi.stubGlobal("Blob", LegacyBlob);
+      vi.stubGlobal("FileReader", LegacyFileReader);
+      vi.stubGlobal("fetch", (request: Request): Promise<Response> => {
+        if (new URL(request.url).pathname === "/localnodes") {
+          return Promise.resolve({
+            headers: new Headers({ "content-type": "application/json" }),
+            body: '["seed"]',
+            status: 200,
+            statusText: "OK",
+          } as unknown as Response);
+        }
+        return Promise.resolve({
+          headers: new Headers({
+            "content-type": "application/x-amz-json-1.0",
+            "content-encoding": "gzip",
+          }),
+          body: undefined,
+          blob: () => Promise.resolve(new LegacyBlob(decoded)),
+          status: 200,
+          statusText: "OK",
+        } as unknown as Response);
+      });
+      const opaqueBody = new LegacyBlob(decoded);
+      await expect(fetchStreamCollector(opaqueBody as never)).resolves.toEqual(decoded);
+      client = new EdgeAlternatorDynamoDBClient({
+        seeds: ["seed"],
+        runtime: "edge",
+        requestHandler: new SmithyFetchHttpHandler(),
+        streamCollector: fetchStreamCollector,
+        discovery: { background: false, requestRefreshIntervalMs: 0 },
+        compression: { response: { algorithms: ["gzip"] } },
+        maxAttempts: 1,
+      });
+
+      await client.alternator.refreshNodes();
+      expect(handle.mock.calls[0]?.[1]?.requestTimeout).toBe(0);
+      await expect(client.send(new ListTablesCommand({}))).resolves.toMatchObject({
+        TableNames: ["decoded"],
+      });
+    } finally {
+      client?.destroy();
+      handle.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("merges Fetch handler options with edge connection settings", async () => {
+    let requestInitCalls = 0;
+    const server = createServer((request, response) => {
+      request.resume();
+      response.setHeader("content-type", "application/x-amz-json-1.0");
+      response.end(JSON.stringify({ TableNames: [] }));
+    });
+    const address = await listen(server);
+    const client = new EdgeAlternatorDynamoDBClient({
+      seeds: [address.address],
+      port: address.port,
+      runtime: "edge",
+      requestHandler: {
+        requestTimeout: undefined,
+        requestInit: undefined,
+        cache: "no-store",
+      } as never,
+      connection: {
+        timeouts: { requestMs: 1_000 },
+        fetch: {
+          requestInit: () => {
+            requestInitCalls += 1;
+            return {};
+          },
+        },
+      },
+      discovery: { background: false, requestRefreshIntervalMs: 0 },
+      maxAttempts: 1,
+    });
+
+    try {
+      await client.send(new ListTablesCommand({}));
+      expect(requestInitCalls).toBe(1);
+      expect(
+        (client.config.requestHandler as SmithyFetchHttpHandler).httpHandlerConfigs(),
+      ).toMatchObject({
+        requestTimeout: 1_000,
+        cache: "no-store",
+      });
+    } finally {
+      client.destroy();
+      await close(server);
+    }
+  });
+
+  it("normalizes Fetch-decoded responses from a handler with another constructor", async () => {
+    const compressed = gzipSync(JSON.stringify({ TableNames: ["decoded"] }));
+    const server = createServer((request, response) => {
+      request.resume();
+      response.setHeader("content-type", "application/x-amz-json-1.0");
+      response.setHeader("content-encoding", "gzip");
+      response.end(compressed);
+    });
+    const address = await listen(server);
+    const delegate = new SmithyFetchHttpHandler();
+    const DuplicateFetchHttpHandler = class FetchHttpHandler {
+      handle(request: HttpRequest, options?: HttpHandlerOptions) {
+        return delegate.handle(request, options);
+      }
+
+      destroy(): void {
+        delegate.destroy();
+      }
+
+      updateHttpClientConfig(...args: Parameters<typeof delegate.updateHttpClientConfig>): void {
+        delegate.updateHttpClientConfig(...args);
+      }
+
+      httpHandlerConfigs(): ReturnType<typeof delegate.httpHandlerConfigs> {
+        return delegate.httpHandlerConfigs();
+      }
+    };
+    const originalDecompressionStream = globalThis.DecompressionStream;
+    vi.stubGlobal("DecompressionStream", undefined);
+    let client: EdgeAlternatorDynamoDBClient | undefined;
+
+    try {
+      client = new EdgeAlternatorDynamoDBClient({
+        seeds: [address.address],
+        port: address.port,
+        runtime: "edge",
+        requestHandler: new DuplicateFetchHttpHandler(),
+        discovery: { background: false, requestRefreshIntervalMs: 0 },
+        compression: { response: { algorithms: ["gzip"] } },
+        maxAttempts: 1,
+      });
+      await expect(client.send(new ListTablesCommand({}))).resolves.toMatchObject({
+        TableNames: ["decoded"],
+      });
+    } finally {
+      client?.destroy();
+      vi.stubGlobal("DecompressionStream", originalDecompressionStream);
+      await close(server);
+    }
+  });
+
+  it.each([
+    ["a cross-realm Blob", foreignBlobBody],
+    ["a reader-only stream", readerOnlyBody],
+  ] as const)("normalizes Fetch-decoded responses backed by %s", async (_label, bodyFactory) => {
+    const decoded = new TextEncoder().encode(JSON.stringify({ TableNames: ["decoded"] }));
+    await expect(fetchStreamCollector(bodyFactory(decoded) as never)).resolves.toEqual(decoded);
+
+    class DecodedFetchHttpHandler extends SmithyFetchHttpHandler {
+      override handle(_request: HttpRequest, _options?: HttpHandlerOptions) {
+        return Promise.resolve({
+          response: new HttpResponse({
+            statusCode: 200,
+            headers: {
+              "content-type": "application/x-amz-json-1.0",
+              "content-encoding": "gzip",
+            },
+            body: bodyFactory(decoded),
+          }),
+        });
+      }
+    }
+
+    const originalDecompressionStream = globalThis.DecompressionStream;
+    vi.stubGlobal("DecompressionStream", undefined);
+    const client = new EdgeAlternatorDynamoDBClient({
+      seeds: ["seed"],
+      runtime: "edge",
+      requestHandler: new DecodedFetchHttpHandler(),
+      streamCollector: fetchStreamCollector,
+      discovery: { background: false, requestRefreshIntervalMs: 0 },
+      compression: { response: { algorithms: ["gzip"] } },
+      maxAttempts: 1,
+    });
+
+    try {
+      await expect(client.send(new ListTablesCommand({}))).resolves.toMatchObject({
+        TableNames: ["decoded"],
+      });
+    } finally {
+      client.destroy();
+      vi.stubGlobal("DecompressionStream", originalDecompressionStream);
+    }
+  });
+
+  it.each([
+    ["gzip", gzipSync],
+    ["deflate", deflateSync],
+  ] as const)("decodes raw %s from a custom handler named FetchHttpHandler", async (encoding, compress) => {
+    const compressed = compress(JSON.stringify({ TableNames: ["decoded"] }));
+    const RawFetchHttpHandler = class FetchHttpHandler extends RecordingHandler {};
+    const client = new EdgeAlternatorDynamoDBClient({
+      seeds: ["seed"],
+      runtime: "edge",
+      requestHandler: new RawFetchHttpHandler(() => new HttpResponse({
+        statusCode: 200,
+        headers: {
+          "content-type": "application/x-amz-json-1.0",
+          "content-encoding": encoding,
+          "content-length": String(compressed.byteLength),
+        },
+        body: bytewiseReadableStream(compressed),
+      })),
+      discovery: { background: false, requestRefreshIntervalMs: 0 },
+      compression: { response: { algorithms: [encoding] } },
+      maxAttempts: 1,
+    });
+
+    try {
+      await expect(client.send(new ListTablesCommand({}))).resolves.toMatchObject({
+        TableNames: ["decoded"],
+      });
+    } finally {
+      client.destroy();
+    }
+  });
+
+  it("decodes raw compression from a custom FetchHttpHandler subclass", async () => {
+    const compressed = gzipSync(JSON.stringify({ TableNames: ["decoded"] }));
+    class RawFetchHttpHandler extends SmithyFetchHttpHandler {
+      override handle(_request: HttpRequest, _options?: HttpHandlerOptions) {
+        return Promise.resolve({
+          response: new HttpResponse({
+            statusCode: 200,
+            headers: {
+              "content-type": "application/x-amz-json-1.0",
+              "content-encoding": "gzip",
+            },
+            body: bytewiseReadableStream(compressed),
+          }),
+        });
+      }
+    }
+    const client = new EdgeAlternatorDynamoDBClient({
+      seeds: ["seed"],
+      runtime: "edge",
+      requestHandler: new RawFetchHttpHandler(),
+      discovery: { background: false, requestRefreshIntervalMs: 0 },
+      compression: { response: { algorithms: ["gzip"] } },
+      maxAttempts: 1,
+    });
+
+    try {
+      await expect(client.send(new ListTablesCommand({}))).resolves.toMatchObject({
+        TableNames: ["decoded"],
+      });
+    } finally {
+      client.destroy();
     }
   });
 
@@ -811,6 +1314,48 @@ function close(server: Server): Promise<void> {
       resolve();
     });
   });
+}
+
+function bytewiseReadableStream(bytes: Uint8Array): ReadableStream<Uint8Array> {
+  let offset = 0;
+  return new ReadableStream({
+    pull(controller) {
+      if (offset >= bytes.byteLength) {
+        controller.close();
+        return;
+      }
+      controller.enqueue(bytes.subarray(offset, offset + 1));
+      offset += 1;
+    },
+  });
+}
+
+function foreignBlobBody(bytes: Uint8Array): unknown {
+  const ForeignBlob = class Blob {
+    constructor(private readonly body: Uint8Array) {}
+
+    arrayBuffer(): Promise<ArrayBuffer> {
+      return Promise.resolve(new Uint8Array(this.body).buffer);
+    }
+  };
+  return new ForeignBlob(bytes);
+}
+
+function readerOnlyBody(bytes: Uint8Array): unknown {
+  let emitted = false;
+  return {
+    getReader() {
+      return {
+        read(): Promise<{ done: boolean; value?: Uint8Array }> {
+          if (emitted) {
+            return Promise.resolve({ done: true });
+          }
+          emitted = true;
+          return Promise.resolve({ done: false, value: bytes });
+        },
+      };
+    },
+  };
 }
 
 function dualStackHandler(addresses: LookupAddress[]): NodeHttpHandler {

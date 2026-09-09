@@ -16,8 +16,18 @@
 
 import { FetchHttpHandler } from "@smithy/fetch-http-handler";
 import type { HttpHandlerUserInput } from "@smithy/protocol-http";
-import { compressBody, decompressResponse, normalizeFetchResponse } from "./compression-edge.js";
-import { withResponseCompression } from "./runtime-common.js";
+import type { FetchHttpHandlerOptions } from "@smithy/types";
+import {
+  compressBody,
+  decompressOrNormalizeResponse,
+  normalizeFetchResponse,
+} from "./compression-edge.js";
+import {
+  type ConfiguredRequestHandler,
+  isHttpHandlerInstance,
+  mergeDefinedOptions,
+  withResponseCompression,
+} from "./runtime-common.js";
 import type {
   AlternatorDynamoDBClientConfig,
   NormalizedAlternatorConfig,
@@ -61,29 +71,36 @@ function assertRuntimeSupport(config: NormalizedAlternatorConfig): void {
 function createRequestHandler(
   input: AlternatorDynamoDBClientConfig,
   config: NormalizedAlternatorConfig,
-): HttpHandlerUserInput {
-  const requestHandler = input.requestHandler
-    ? FetchHttpHandler.create(input.requestHandler as Parameters<typeof FetchHttpHandler.create>[0])
-    : createFetchHttpHandler(config);
-  const responseDecompressor = requestHandler instanceof FetchHttpHandler
-    ? normalizeFetchResponse
-    : decompressResponse;
-  if (
-    config.compression.response.enabled &&
-    responseDecompressor === decompressResponse &&
-    typeof DecompressionStream === "undefined"
-  ) {
-    throw new Error("Alternator edge runtime response compression with a custom HTTP handler requires DecompressionStream support");
-  }
-  return withResponseCompression(
-    requestHandler,
-    config.compression.response.enabled,
-    responseDecompressor,
-  );
+): ConfiguredRequestHandler {
+  const configuredHandler = input.requestHandler;
+  const configuredHandlerIsInstance = isHttpHandlerInstance(configuredHandler);
+  const stockFetchHandler = configuredHandlerIsInstance && isStockFetchHttpHandler(configuredHandler);
+  const requestHandler = isHttpHandlerInstance(configuredHandler) || typeof configuredHandler === "function"
+    ? FetchHttpHandler.create(configuredHandler as Parameters<typeof FetchHttpHandler.create>[0])
+    : createFetchHttpHandler(config, configuredHandler as FetchHttpHandlerOptions | undefined);
+  const responseDecompressor = requestHandler === configuredHandler && !stockFetchHandler
+    ? decompressOrNormalizeResponse
+    : normalizeFetchResponse;
+  return {
+    requestHandler: withResponseCompression(
+      requestHandler,
+      config.compression.response.enabled,
+      responseDecompressor,
+    ),
+    forwardDiscoveryRequestTimeout: configuredHandlerIsInstance && !stockFetchHandler,
+  };
 }
 
-function createFetchHttpHandler(config: NormalizedAlternatorConfig): FetchHttpHandler {
-  const fetchOptions = {
+function isStockFetchHttpHandler(requestHandler: HttpHandlerUserInput): boolean {
+  return requestHandler instanceof FetchHttpHandler &&
+    requestHandler.handle === FetchHttpHandler.prototype.handle;
+}
+
+function createFetchHttpHandler(
+  config: NormalizedAlternatorConfig,
+  requestHandlerOptions?: FetchHttpHandlerOptions,
+): FetchHttpHandler {
+  const fetchOptions: FetchHttpHandlerOptions = {
     ...(config.connection && "fetch" in config.connection ? config.connection.fetch : undefined),
   };
   if (config.connection?.timeouts?.requestMs !== undefined) {
@@ -92,5 +109,5 @@ function createFetchHttpHandler(config: NormalizedAlternatorConfig): FetchHttpHa
   if (config.connection?.keepAlive !== undefined) {
     fetchOptions.keepAlive = config.connection.keepAlive;
   }
-  return new FetchHttpHandler(fetchOptions);
+  return new FetchHttpHandler(mergeDefinedOptions(fetchOptions, requestHandlerOptions));
 }

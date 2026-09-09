@@ -62,8 +62,39 @@ export async function decompressResponse(response: HttpResponse): Promise<HttpRe
   return mapCompressedResponse(response, decompressWebResponseBody);
 }
 
+export async function decompressOrNormalizeResponse(response: HttpResponse): Promise<HttpResponse> {
+  return mapCompressedResponse(response, decompressOrNormalizeWebResponseBody);
+}
+
 export function normalizeFetchResponse(response: HttpResponse): Promise<HttpResponse> {
   return Promise.resolve(mapFetchDecodedResponse(response));
+}
+
+async function decompressOrNormalizeWebResponseBody(
+  body: unknown,
+  encoding: AlternatorResponseCompressionAlgorithm,
+): Promise<unknown> {
+  // Fetch exposes a decoded body while preserving the wire encoding header.
+  // Probe the body instead of relying on handler identity, which is not stable
+  // across duplicate packages and can collide with custom class names.
+  const stream = await bodyToReadableStream(body);
+  const [probe, payload] = stream.tee();
+  let encoded: boolean;
+  try {
+    encoded = await hasCompressionSignature(probe, encoding);
+  } catch (error) {
+    void payload.cancel().catch(() => undefined);
+    throw error;
+  }
+
+  if (!encoded) {
+    return payload;
+  }
+  if (typeof DecompressionStream === "undefined") {
+    void payload.cancel().catch(() => undefined);
+    throw new Error("response compression requires DecompressionStream support in edge runtime");
+  }
+  return payload.pipeThrough(new DecompressionStream(encoding));
 }
 
 async function decompressWebResponseBody(
@@ -76,4 +107,47 @@ async function decompressWebResponseBody(
 
   const stream = await bodyToReadableStream(body);
   return stream.pipeThrough(new DecompressionStream(encoding));
+}
+
+async function hasCompressionSignature(
+  stream: ReadableStream<BufferSource>,
+  encoding: AlternatorResponseCompressionAlgorithm,
+): Promise<boolean> {
+  const requiredBytes = encoding === "gzip" ? 3 : 2;
+  const prefix = new Uint8Array(requiredBytes);
+  let offset = 0;
+  const reader = stream.getReader();
+
+  try {
+    while (offset < requiredBytes) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      const bytes = bodyToBytes(value);
+      if (!bytes) {
+        throw new Error("compressed response body chunk is not readable");
+      }
+      const length = Math.min(bytes.byteLength, requiredBytes - offset);
+      prefix.set(bytes.subarray(0, length), offset);
+      offset += length;
+    }
+  } finally {
+    void reader.cancel().catch(() => undefined);
+  }
+
+  if (offset < requiredBytes) {
+    return false;
+  }
+  if (encoding === "gzip") {
+    return prefix[0] === 0x1f && prefix[1] === 0x8b && prefix[2] === 0x08;
+  }
+
+  const compressionMethodAndInfo = prefix[0] ?? 0;
+  const flags = prefix[1] ?? 0;
+  return (
+    (compressionMethodAndInfo & 0x0f) === 8 &&
+    (compressionMethodAndInfo >> 4) <= 7 &&
+    ((compressionMethodAndInfo << 8) | flags) % 31 === 0
+  );
 }
