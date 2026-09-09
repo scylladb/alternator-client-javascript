@@ -21,6 +21,8 @@ import type {
   NodeHttpHandlerOptions,
 } from "@smithy/types";
 import { readFile } from "node:fs/promises";
+import { Agent as HttpAgent } from "node:http";
+import { Agent as HttpsAgent, type AgentOptions as HttpsAgentOptions } from "node:https";
 import { compressBody, decompressResponse } from "./compression-node.js";
 import { withResponseCompression } from "./runtime-common.js";
 import type {
@@ -49,7 +51,7 @@ function createRequestHandler(
 ): HttpHandlerUserInput {
   if (input.requestHandler) {
     return withResponseCompression(
-      input.requestHandler,
+      NodeHttpHandler.create(input.requestHandler as Handler | NodeHttpHandlerOptions),
       config.compression.response.enabled,
       decompressResponse,
     );
@@ -65,6 +67,7 @@ function createRequestHandler(
 class LazyNodeHttpHandler implements Handler {
   readonly metadata = { handlerProtocol: "http/1.1" };
   private delegate?: Handler;
+  private delegatePromise: Promise<Handler> | undefined;
   private pendingUpdates = new Map<keyof NodeHttpHandlerOptions, NodeHttpHandlerOptions[keyof NodeHttpHandlerOptions]>();
 
   constructor(private readonly optionsProvider: () => Promise<NodeHttpHandlerOptions>) {}
@@ -100,14 +103,29 @@ class LazyNodeHttpHandler implements Handler {
   }
 
   private async getDelegate(): Promise<Handler> {
-    if (!this.delegate) {
-      const options = await this.optionsProvider();
-      for (const [key, value] of this.pendingUpdates) {
-        (options as Record<string, unknown>)[key] = value;
-      }
-      this.delegate = new NodeHttpHandler(options);
+    if (this.delegate) {
+      return this.delegate;
     }
-    return this.delegate;
+    if (!this.delegatePromise) {
+      const initialization = this.createDelegate();
+      this.delegatePromise = initialization;
+      void initialization.catch(() => {
+        if (this.delegatePromise === initialization) {
+          this.delegatePromise = undefined;
+        }
+      });
+    }
+    return this.delegatePromise;
+  }
+
+  private async createDelegate(): Promise<Handler> {
+    const options = await this.optionsProvider();
+    for (const [key, value] of this.pendingUpdates) {
+      (options as Record<string, unknown>)[key] = value;
+    }
+    const delegate = new NodeHttpHandler(options);
+    this.delegate = delegate;
+    return delegate;
   }
 }
 
@@ -119,26 +137,27 @@ async function buildNodeHandlerOptions(
   const keepAlive = connection?.keepAlive ?? true;
   const maxSockets = connection && "maxSockets" in connection ? connection.maxSockets ?? 50 : 50;
 
-  const httpAgent: Record<string, unknown> = { keepAlive, maxSockets };
-  const httpsAgent: Record<string, unknown> = { keepAlive, maxSockets };
+  const httpAgent = new HttpAgent({ keepAlive, maxSockets });
+  const httpsAgentOptions: HttpsAgentOptions = { keepAlive, maxSockets };
 
   if (tls) {
     if (tls.ca !== undefined) {
-      httpsAgent.ca = await tlsMaterialValue(tls.ca);
+      httpsAgentOptions.ca = await tlsMaterialValue(tls.ca);
     }
     if (tls.cert !== undefined) {
-      httpsAgent.cert = await tlsMaterialValue(tls.cert);
+      httpsAgentOptions.cert = await tlsMaterialValue(tls.cert);
     }
     if (tls.key !== undefined) {
-      httpsAgent.key = await tlsMaterialValue(tls.key);
+      httpsAgentOptions.key = await tlsMaterialValue(tls.key);
     }
     if (tls.rejectUnauthorized !== undefined) {
-      httpsAgent.rejectUnauthorized = tls.rejectUnauthorized;
+      httpsAgentOptions.rejectUnauthorized = tls.rejectUnauthorized;
     }
     if (tls.sessionCache === false) {
-      httpsAgent.maxCachedSessions = 0;
+      httpsAgentOptions.maxCachedSessions = 0;
     }
   }
+  const httpsAgent = new HttpsAgent(httpsAgentOptions);
 
   const options: NodeHttpHandlerOptions = {
     httpAgent,
@@ -162,12 +181,12 @@ async function buildNodeHandlerOptions(
   return options;
 }
 
-async function tlsMaterialValue(material: AlternatorTlsMaterial): Promise<string | Uint8Array> {
+async function tlsMaterialValue(material: AlternatorTlsMaterial): Promise<string | Buffer> {
   if ("file" in material) {
     return readFile(material.file);
   }
   if ("bytes" in material) {
-    return material.bytes;
+    return Buffer.from(material.bytes);
   }
   return material.text;
 }

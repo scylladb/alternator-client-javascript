@@ -261,21 +261,50 @@ export class AlternatorDiscovery {
         host: hostHeader(host, this.config.port),
       },
     });
-    const response = await this.requestHandler.handle(request, {
-      requestTimeout: this.config.discovery.timeoutMs,
+    const timeoutMs = this.config.discovery.timeoutMs;
+    const abortController = new AbortController();
+    let responseBody: unknown;
+    const fetchNodes = async (): Promise<string[]> => {
+      const response = await this.requestHandler.handle(request, {
+        requestTimeout: timeoutMs,
+        abortSignal: abortController.signal,
+      });
+      responseBody = response.response.body;
+
+      if (response.response.statusCode < 200 || response.response.statusCode >= 300) {
+        await drainResponseBody(responseBody, timeoutMs);
+        throw new Error(`/localnodes returned HTTP ${response.response.statusCode}`);
+      }
+
+      const body = await bodyToString(responseBody);
+      const parsed: unknown = JSON.parse(body);
+      if (!Array.isArray(parsed) || !parsed.every((node) => typeof node === "string")) {
+        throw new Error("/localnodes returned an invalid node list");
+      }
+      return parsed;
+    };
+
+    if (timeoutMs <= 0) {
+      return fetchNodes();
+    }
+
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const timeoutPromise = new Promise<never>((_resolve, reject) => {
+      timeout = setTimeout(() => {
+        abortController.abort();
+        destroyResponseBody(responseBody);
+        reject(new Error(`/localnodes request timed out after ${timeoutMs} ms`));
+      }, timeoutMs);
+      timeout.unref?.();
     });
 
-    if (response.response.statusCode < 200 || response.response.statusCode >= 300) {
-      await drainResponseBody(response.response.body, this.config.discovery.timeoutMs);
-      throw new Error(`/localnodes returned HTTP ${response.response.statusCode}`);
+    try {
+      return await Promise.race([fetchNodes(), timeoutPromise]);
+    } finally {
+      if (timeout) {
+        clearTimeout(timeout);
+      }
     }
-
-    const body = await bodyToString(response.response.body);
-    const parsed: unknown = JSON.parse(body);
-    if (!Array.isArray(parsed) || !parsed.every((node) => typeof node === "string")) {
-      throw new Error("/localnodes returned an invalid node list");
-    }
-    return parsed;
   }
 
   private toNode(host: string): AlternatorNode {

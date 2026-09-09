@@ -23,6 +23,8 @@ import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { Agent, createServer, type Server } from "node:http";
 import type { LookupAddress } from "node:dns";
 import type { AddressInfo, LookupFunction } from "node:net";
+import { fileURLToPath } from "node:url";
+import { gzipSync } from "node:zlib";
 
 const missingDatacenterQuery = { dc: "__alternator_client_missing_dc__" };
 const missingRackQuery = { rack: "__alternator_client_missing_rack__" };
@@ -561,6 +563,124 @@ describe("Alternator discovery", () => {
     } finally {
       client.destroy();
       server.closeAllConnections?.();
+      await close(server);
+    }
+  });
+
+  it.each(["headers", "body"] as const)(
+    "enforces discovery timeout while waiting for response %s",
+    async (stallAt) => {
+      const server = createServer((request, response) => {
+        expect(request.url).toBe("/localnodes");
+        request.resume();
+        if (stallAt === "body") {
+          response.statusCode = 200;
+          response.setHeader("content-type", "application/json");
+          response.write('["node-a.internal"');
+          response.flushHeaders();
+        }
+      });
+      const address = await listen(server);
+      const client = new AlternatorDynamoDBClient({
+        seeds: [address.address],
+        port: address.port,
+        discovery: {
+          background: false,
+          timeoutMs: 20,
+        },
+        ...(stallAt === "body"
+          ? { connection: { throwOnRequestTimeout: true } }
+          : {}),
+      });
+
+      try {
+        const completed = await Promise.race([
+          client.alternator.refreshNodes().then(() => true),
+          new Promise<false>((resolve) => setTimeout(() => resolve(false), 500)),
+        ]);
+        expect(completed).toBe(true);
+        expect(client.alternator.nodes()).toEqual([
+          {
+            host: address.address,
+            scheme: "http",
+            port: address.port,
+            url: `http://${address.address}:${address.port}`,
+          },
+        ]);
+      } finally {
+        client.destroy();
+        server.closeAllConnections?.();
+        await close(server);
+      }
+    },
+  );
+
+  it("keeps maxSockets bounded during concurrent lazy handler initialization", async () => {
+    let activeRequests = 0;
+    let peakRequests = 0;
+    const server = createServer((request, response) => {
+      request.resume();
+      activeRequests += 1;
+      peakRequests = Math.max(peakRequests, activeRequests);
+      setTimeout(() => {
+        response.setHeader("content-type", "application/x-amz-json-1.0");
+        response.end(JSON.stringify({ TableNames: [] }));
+        activeRequests -= 1;
+      }, 20);
+    });
+    const address = await listen(server);
+    const client = new AlternatorDynamoDBClient({
+      seeds: [address.address],
+      port: address.port,
+      tls: {
+        ca: { file: fileURLToPath(import.meta.url) },
+      },
+      discovery: { background: false },
+      connection: { maxSockets: 1 },
+      maxAttempts: 1,
+    });
+
+    try {
+      await Promise.all(
+        Array.from({ length: 8 }, () => client.send(new ListTablesCommand({}))),
+      );
+      expect(peakRequests).toBe(1);
+    } finally {
+      client.destroy();
+      await close(server);
+    }
+  });
+
+  it("uses Fetch decoding once for compressed edge responses", async () => {
+    const compressed = gzipSync(JSON.stringify({ TableNames: ["decoded"] }));
+    const server = createServer((request, response) => {
+      request.resume();
+      response.setHeader("content-type", "application/x-amz-json-1.0");
+      response.setHeader("content-encoding", "gzip");
+      response.setHeader("content-length", String(compressed.byteLength));
+      response.end(compressed);
+    });
+    const address = await listen(server);
+    const client = new EdgeAlternatorDynamoDBClient({
+      seeds: [address.address],
+      port: address.port,
+      runtime: "edge",
+      discovery: {
+        background: false,
+        requestRefreshIntervalMs: 0,
+      },
+      compression: {
+        response: { algorithms: ["gzip"] },
+      },
+      maxAttempts: 1,
+    });
+
+    try {
+      await expect(client.send(new ListTablesCommand({}))).resolves.toMatchObject({
+        TableNames: ["decoded"],
+      });
+    } finally {
+      client.destroy();
       await close(server);
     }
   });

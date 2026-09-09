@@ -16,7 +16,7 @@
 
 export { AlternatorDynamoDBClient } from "./client.js";
 export { routing } from "./routing.js";
-export type { AlternatorDynamoDBClientApi } from "./client.js";
+export type { AlternatorDynamoDBClientApi, AlternatorRequestHandler } from "./client.js";
 export type {
   AlternatorCompressionOptions,
   AlternatorConnectionOptions,
