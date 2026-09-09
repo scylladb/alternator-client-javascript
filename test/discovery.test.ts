@@ -63,6 +63,62 @@ describe("Alternator discovery", () => {
     ]);
   });
 
+  it("refreshes through the original contact after a learned node becomes unavailable", async () => {
+    let recovering = false;
+    const handler = new RecordingHandler((request) => {
+      if (request.path === "/localnodes") {
+        expect(request.hostname).toBe("entrypoint.test");
+        expect(request.headers.host).toBe("entrypoint.test:8080");
+        return recovering ? ["new-node.internal"] : ["old-node.internal"];
+      }
+      if (request.hostname === "old-node.internal" && recovering) {
+        throw new Error("learned node unavailable");
+      }
+      return { TableNames: [] };
+    });
+    const client = new AlternatorDynamoDBClient({
+      seeds: ["entrypoint.test"],
+      requestHandler: handler,
+      discovery: { background: false },
+      maxAttempts: 1,
+    });
+
+    try {
+      await expect(client.alternator.refreshNodes()).resolves.toEqual([
+        {
+          host: "old-node.internal",
+          scheme: "http",
+          port: 8080,
+          url: "http://old-node.internal:8080",
+        },
+      ]);
+
+      recovering = true;
+      await expect(client.send(new ListTablesCommand({}))).rejects.toThrow(
+        "learned node unavailable",
+      );
+      await expect(client.alternator.refreshNodes()).resolves.toEqual([
+        {
+          host: "new-node.internal",
+          scheme: "http",
+          port: 8080,
+          url: "http://new-node.internal:8080",
+        },
+      ]);
+      await expect(client.send(new ListTablesCommand({}))).resolves.toMatchObject({
+        TableNames: [],
+      });
+
+      expect(
+        handler.requests
+          .filter(({ path }) => path === "/localnodes")
+          .map(({ hostname }) => hostname),
+      ).toEqual(["entrypoint.test", "entrypoint.test"]);
+    } finally {
+      client.destroy();
+    }
+  });
+
   it("unions cluster discovery across configured seeds", async () => {
     const handler = new RecordingHandler((request) => {
       if (request.path !== "/localnodes") {
