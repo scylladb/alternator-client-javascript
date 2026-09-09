@@ -24,7 +24,11 @@ import { readFile } from "node:fs/promises";
 import { Agent as HttpAgent } from "node:http";
 import { Agent as HttpsAgent, type AgentOptions as HttpsAgentOptions } from "node:https";
 import { compressBody, decompressResponse } from "./compression-node.js";
-import { withResponseCompression } from "./runtime-common.js";
+import {
+  isHttpHandlerInstance,
+  mergeDefinedOptions,
+  withResponseCompression,
+} from "./runtime-common.js";
 import type {
   AlternatorDynamoDBClientConfig,
   AlternatorTlsMaterial,
@@ -49,7 +53,7 @@ function createRequestHandler(
   input: AlternatorDynamoDBClientConfig,
   config: NormalizedAlternatorConfig,
 ): HttpHandlerUserInput {
-  if (input.requestHandler) {
+  if (isHttpHandlerInstance(input.requestHandler) || typeof input.requestHandler === "function") {
     return withResponseCompression(
       NodeHttpHandler.create(input.requestHandler as Handler | NodeHttpHandlerOptions),
       config.compression.response.enabled,
@@ -58,7 +62,10 @@ function createRequestHandler(
   }
 
   return withResponseCompression(
-    new LazyNodeHttpHandler(() => buildNodeHandlerOptions(config)),
+    new LazyNodeHttpHandler(() => buildNodeHandlerOptions(
+      config,
+      input.requestHandler as NodeHttpHandlerOptions | undefined,
+    )),
     config.compression.response.enabled,
     decompressResponse,
   );
@@ -131,6 +138,7 @@ class LazyNodeHttpHandler implements Handler {
 
 async function buildNodeHandlerOptions(
   config: NormalizedAlternatorConfig,
+  requestHandlerOptions: NodeHttpHandlerOptions | undefined,
 ): Promise<NodeHttpHandlerOptions> {
   const connection = config.connection;
   const tls = config.tls;
@@ -178,7 +186,7 @@ async function buildNodeHandlerOptions(
     options.throwOnRequestTimeout = connection.throwOnRequestTimeout;
   }
 
-  return options;
+  return mergeDefinedOptions(options, requestHandlerOptions);
 }
 
 async function tlsMaterialValue(material: AlternatorTlsMaterial): Promise<string | Buffer> {

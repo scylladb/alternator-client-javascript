@@ -16,8 +16,13 @@
 
 import { FetchHttpHandler } from "@smithy/fetch-http-handler";
 import type { HttpHandlerUserInput } from "@smithy/protocol-http";
+import type { FetchHttpHandlerOptions } from "@smithy/types";
 import { compressBody, decompressResponse, normalizeFetchResponse } from "./compression-edge.js";
-import { withResponseCompression } from "./runtime-common.js";
+import {
+  isHttpHandlerInstance,
+  mergeDefinedOptions,
+  withResponseCompression,
+} from "./runtime-common.js";
 import type {
   AlternatorDynamoDBClientConfig,
   NormalizedAlternatorConfig,
@@ -62,9 +67,10 @@ function createRequestHandler(
   input: AlternatorDynamoDBClientConfig,
   config: NormalizedAlternatorConfig,
 ): HttpHandlerUserInput {
-  const requestHandler = input.requestHandler
-    ? FetchHttpHandler.create(input.requestHandler as Parameters<typeof FetchHttpHandler.create>[0])
-    : createFetchHttpHandler(config);
+  const configuredHandler = input.requestHandler;
+  const requestHandler = isHttpHandlerInstance(configuredHandler) || typeof configuredHandler === "function"
+    ? FetchHttpHandler.create(configuredHandler as Parameters<typeof FetchHttpHandler.create>[0])
+    : createFetchHttpHandler(config, configuredHandler as FetchHttpHandlerOptions | undefined);
   const responseDecompressor = requestHandler instanceof FetchHttpHandler
     ? normalizeFetchResponse
     : decompressResponse;
@@ -82,8 +88,11 @@ function createRequestHandler(
   );
 }
 
-function createFetchHttpHandler(config: NormalizedAlternatorConfig): FetchHttpHandler {
-  const fetchOptions = {
+function createFetchHttpHandler(
+  config: NormalizedAlternatorConfig,
+  requestHandlerOptions?: FetchHttpHandlerOptions,
+): FetchHttpHandler {
+  const fetchOptions: FetchHttpHandlerOptions = {
     ...(config.connection && "fetch" in config.connection ? config.connection.fetch : undefined),
   };
   if (config.connection?.timeouts?.requestMs !== undefined) {
@@ -92,5 +101,5 @@ function createFetchHttpHandler(config: NormalizedAlternatorConfig): FetchHttpHa
   if (config.connection?.keepAlive !== undefined) {
     fetchOptions.keepAlive = config.connection.keepAlive;
   }
-  return new FetchHttpHandler(fetchOptions);
+  return new FetchHttpHandler(mergeDefinedOptions(fetchOptions, requestHandlerOptions));
 }

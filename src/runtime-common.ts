@@ -73,6 +73,28 @@ export function withResponseCompression(
   return new ResponseCompressionHttpHandler(requestHandler, decompressResponse);
 }
 
+export function isHttpHandlerInstance(requestHandler: unknown): requestHandler is GenericHttpHandler {
+  return (
+    typeof requestHandler === "object" &&
+    requestHandler !== null &&
+    "handle" in requestHandler &&
+    typeof (requestHandler as { handle?: unknown }).handle === "function"
+  );
+}
+
+export function mergeDefinedOptions<T extends object>(base: T, overrides: T | undefined): T {
+  if (!overrides) {
+    return base;
+  }
+  const definedOverrides = Object.fromEntries(
+    Object.entries(overrides).filter(([, value]) => value !== undefined),
+  );
+  return {
+    ...base,
+    ...definedOverrides,
+  };
+}
+
 function isHttpHandler(requestHandler: HttpHandlerUserInput): requestHandler is GenericHttpHandler {
   return (
     typeof requestHandler === "object" &&

@@ -19,6 +19,7 @@ import { AlternatorDynamoDBClient, routing } from "../src/index.js";
 import { AlternatorDynamoDBClient as EdgeAlternatorDynamoDBClient } from "../src/edge.js";
 import { RecordingHandler } from "./helpers.js";
 import { ListTablesCommand } from "@aws-sdk/client-dynamodb";
+import type { FetchHttpHandler as SmithyFetchHttpHandler } from "@smithy/fetch-http-handler";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { Agent, createServer, type Server } from "node:http";
 import type { LookupAddress } from "node:dns";
@@ -671,7 +672,7 @@ describe("Alternator discovery", () => {
     },
   );
 
-  it("keeps maxSockets bounded during concurrent lazy handler initialization", async () => {
+  it("merges HTTP handler options without dropping bounded connection settings", async () => {
     let activeRequests = 0;
     let peakRequests = 0;
     const server = createServer((request, response) => {
@@ -691,6 +692,10 @@ describe("Alternator discovery", () => {
       tls: {
         ca: { file: fileURLToPath(import.meta.url) },
       },
+      requestHandler: {
+        requestTimeout: 1_000,
+        httpAgent: undefined,
+      } as never,
       discovery: { background: false },
       connection: { maxSockets: 1 },
       maxAttempts: 1,
@@ -734,6 +739,51 @@ describe("Alternator discovery", () => {
     try {
       await expect(client.send(new ListTablesCommand({}))).resolves.toMatchObject({
         TableNames: ["decoded"],
+      });
+    } finally {
+      client.destroy();
+      await close(server);
+    }
+  });
+
+  it("merges Fetch handler options with edge connection settings", async () => {
+    let requestInitCalls = 0;
+    const server = createServer((request, response) => {
+      request.resume();
+      response.setHeader("content-type", "application/x-amz-json-1.0");
+      response.end(JSON.stringify({ TableNames: [] }));
+    });
+    const address = await listen(server);
+    const client = new EdgeAlternatorDynamoDBClient({
+      seeds: [address.address],
+      port: address.port,
+      runtime: "edge",
+      requestHandler: {
+        requestTimeout: undefined,
+        requestInit: undefined,
+        cache: "no-store",
+      } as never,
+      connection: {
+        timeouts: { requestMs: 1_000 },
+        fetch: {
+          requestInit: () => {
+            requestInitCalls += 1;
+            return {};
+          },
+        },
+      },
+      discovery: { background: false, requestRefreshIntervalMs: 0 },
+      maxAttempts: 1,
+    });
+
+    try {
+      await client.send(new ListTablesCommand({}));
+      expect(requestInitCalls).toBe(1);
+      expect(
+        (client.config.requestHandler as SmithyFetchHttpHandler).httpHandlerConfigs(),
+      ).toMatchObject({
+        requestTimeout: 1_000,
+        cache: "no-store",
       });
     } finally {
       client.destroy();
