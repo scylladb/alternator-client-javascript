@@ -149,7 +149,7 @@ least one seed per datacenter.
 | Socket pool tuning | Yes | No |
 | TLS session cache tuning | Yes | No |
 | Gzip request compression | Yes | Only with `CompressionStream` |
-| Gzip/deflate response compression | Yes | Only with `DecompressionStream` |
+| Gzip/deflate response compression | Yes | Yes; custom raw HTTP handlers require `DecompressionStream` |
 
 Unsupported edge combinations throw at construction time with clear errors.
 

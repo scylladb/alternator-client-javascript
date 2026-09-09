@@ -77,6 +77,22 @@ export async function mapCompressedResponse(
   });
 }
 
+export function mapFetchDecodedResponse(response: HttpResponse): HttpResponse {
+  // Fetch decodes content codings before exposing the body but preserves the
+  // original response headers. Remove stale metadata without decoding twice.
+  const encoding = responseContentEncoding(getHeader(response.headers, "content-encoding"));
+  if (!encoding) {
+    return response;
+  }
+
+  return new HttpResponse({
+    statusCode: response.statusCode,
+    ...(response.reason !== undefined ? { reason: response.reason } : {}),
+    headers: removeHeaders(response.headers, ["content-encoding", "content-length"]),
+    body: response.body,
+  });
+}
+
 export async function bodyToReadableStream(body: unknown): Promise<ReadableStream> {
   if (typeof ReadableStream !== "undefined" && body instanceof ReadableStream) {
     return body;

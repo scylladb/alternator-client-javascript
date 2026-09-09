@@ -16,7 +16,7 @@
 
 import { FetchHttpHandler } from "@smithy/fetch-http-handler";
 import type { HttpHandlerUserInput } from "@smithy/protocol-http";
-import { compressBody, decompressResponse } from "./compression-edge.js";
+import { compressBody, decompressResponse, normalizeFetchResponse } from "./compression-edge.js";
 import { withResponseCompression } from "./runtime-common.js";
 import type {
   AlternatorDynamoDBClientConfig,
@@ -56,23 +56,33 @@ function assertRuntimeSupport(config: NormalizedAlternatorConfig): void {
   if (requestCompression.enabled && !requestCompression.compressor && typeof CompressionStream === "undefined") {
     throw new Error("Alternator edge runtime gzip compression requires CompressionStream support");
   }
-  if (config.compression.response.enabled && typeof DecompressionStream === "undefined") {
-    throw new Error("Alternator edge runtime response compression requires DecompressionStream support");
-  }
 }
 
 function createRequestHandler(
   input: AlternatorDynamoDBClientConfig,
   config: NormalizedAlternatorConfig,
 ): HttpHandlerUserInput {
-  if (input.requestHandler) {
-    return withResponseCompression(
-      input.requestHandler,
-      config.compression.response.enabled,
-      decompressResponse,
-    );
+  const requestHandler = input.requestHandler
+    ? FetchHttpHandler.create(input.requestHandler as Parameters<typeof FetchHttpHandler.create>[0])
+    : createFetchHttpHandler(config);
+  const responseDecompressor = requestHandler instanceof FetchHttpHandler
+    ? normalizeFetchResponse
+    : decompressResponse;
+  if (
+    config.compression.response.enabled &&
+    responseDecompressor === decompressResponse &&
+    typeof DecompressionStream === "undefined"
+  ) {
+    throw new Error("Alternator edge runtime response compression with a custom HTTP handler requires DecompressionStream support");
   }
+  return withResponseCompression(
+    requestHandler,
+    config.compression.response.enabled,
+    responseDecompressor,
+  );
+}
 
+function createFetchHttpHandler(config: NormalizedAlternatorConfig): FetchHttpHandler {
   const fetchOptions = {
     ...(config.connection && "fetch" in config.connection ? config.connection.fetch : undefined),
   };
@@ -82,9 +92,5 @@ function createRequestHandler(
   if (config.connection?.keepAlive !== undefined) {
     fetchOptions.keepAlive = config.connection.keepAlive;
   }
-  return withResponseCompression(
-    new FetchHttpHandler(fetchOptions),
-    config.compression.response.enabled,
-    decompressResponse,
-  );
+  return new FetchHttpHandler(fetchOptions);
 }

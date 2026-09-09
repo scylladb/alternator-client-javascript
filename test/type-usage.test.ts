@@ -24,11 +24,16 @@ import { describe, expectTypeOf, it } from "vitest";
 import {
   AlternatorDynamoDBClient,
   routing,
+  type AlternatorRequestHandler,
 } from "../src/index.js";
 import { AlternatorDynamoDBDocumentClient } from "../src/document.js";
 import { RecordingHandler } from "./helpers.js";
 
 describe("public type usage", () => {
+  it("exports the request handler type from the root entrypoint", () => {
+    expectTypeOf<RecordingHandler>().toMatchTypeOf<AlternatorRequestHandler>();
+  });
+
   it("accepts native AWS SDK v3 commands", () => {
     const client = new AlternatorDynamoDBClient({
       seeds: ["localhost"],

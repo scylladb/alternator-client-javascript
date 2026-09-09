@@ -360,6 +360,25 @@ describe("AlternatorDynamoDBClient config", () => {
     ).toThrow(/compression\.response/);
   });
 
+  it("accepts HTTP handler option objects with response compression", () => {
+    const nodeClient = new AlternatorDynamoDBClient({
+      seeds: ["localhost"],
+      requestHandler: { requestTimeout: 1_000 },
+      compression: { response: {} },
+      discovery: { background: false },
+    });
+    const edgeClient = new EdgeAlternatorDynamoDBClient({
+      seeds: ["localhost"],
+      runtime: "edge",
+      requestHandler: { requestTimeout: 1_000 },
+      compression: { response: {} },
+      discovery: { background: false },
+    });
+
+    nodeClient.destroy();
+    edgeClient.destroy();
+  });
+
   it("validates key route affinity mode", () => {
     for (const mode of ["bad", "", 42]) {
       expect(

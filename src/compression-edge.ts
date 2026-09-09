@@ -18,6 +18,7 @@ import type { HttpResponse } from "@smithy/protocol-http";
 import { bodyToBytes } from "./body.js";
 import {
   bodyToReadableStream,
+  mapFetchDecodedResponse,
   mapCompressedResponse,
 } from "./compression-shared.js";
 import type { CompressedBody } from "./compression-types.js";
@@ -59,6 +60,10 @@ export async function compressBody(
 
 export async function decompressResponse(response: HttpResponse): Promise<HttpResponse> {
   return mapCompressedResponse(response, decompressWebResponseBody);
+}
+
+export function normalizeFetchResponse(response: HttpResponse): Promise<HttpResponse> {
+  return Promise.resolve(mapFetchDecodedResponse(response));
 }
 
 async function decompressWebResponseBody(
