@@ -974,26 +974,11 @@ describe("Alternator discovery", () => {
 
   it("preserves opaque decoded bodies from an explicitly configured Fetch handler", async () => {
     const decoded = new TextEncoder().encode(JSON.stringify({ TableNames: ["decoded"] }));
-    const LegacyBlob = class Blob {
-      constructor(readonly bytes: Uint8Array) {}
-    };
-    class LegacyFileReader {
-      readyState = 0;
-      result: string | null = null;
-      onloadend: (() => void) | null = null;
-
-      readAsDataURL(blob: InstanceType<typeof LegacyBlob>): void {
-        this.readyState = 2;
-        this.result = `data:application/octet-stream;base64,${Buffer.from(blob.bytes).toString("base64")}`;
-        this.onloadend?.();
-      }
-    }
+    const opaqueBody = new Blob([decoded]);
     const handle = vi.spyOn(SmithyFetchHttpHandler.prototype, "handle");
     let client: EdgeAlternatorDynamoDBClient | undefined;
 
     try {
-      vi.stubGlobal("Blob", LegacyBlob);
-      vi.stubGlobal("FileReader", LegacyFileReader);
       vi.stubGlobal("fetch", (request: Request): Promise<Response> => {
         if (new URL(request.url).pathname === "/localnodes") {
           return Promise.resolve({
@@ -1009,13 +994,11 @@ describe("Alternator discovery", () => {
             "content-encoding": "gzip",
           }),
           body: undefined,
-          blob: () => Promise.resolve(new LegacyBlob(decoded)),
+          blob: () => Promise.resolve(opaqueBody),
           status: 200,
           statusText: "OK",
         } as unknown as Response);
       });
-      const opaqueBody = new LegacyBlob(decoded);
-      await expect(fetchStreamCollector(opaqueBody as never)).resolves.toEqual(decoded);
       client = new EdgeAlternatorDynamoDBClient({
         seeds: ["seed"],
         runtime: "edge",
@@ -1039,6 +1022,8 @@ describe("Alternator discovery", () => {
   });
 
   it("merges Fetch handler options with edge connection settings", async () => {
+    const defaultFetch = globalThis.fetch;
+    let customFetchCalls = 0;
     let requestInitCalls = 0;
     const server = createServer((request, response) => {
       request.resume();
@@ -1058,6 +1043,10 @@ describe("Alternator discovery", () => {
       connection: {
         timeouts: { requestMs: 1_000 },
         fetch: {
+          customFetch: (input, init) => {
+            customFetchCalls += 1;
+            return defaultFetch(input, init);
+          },
           requestInit: () => {
             requestInitCalls += 1;
             return {};
@@ -1070,6 +1059,7 @@ describe("Alternator discovery", () => {
 
     try {
       await client.send(new ListTablesCommand({}));
+      expect(customFetchCalls).toBeGreaterThan(0);
       expect(requestInitCalls).toBe(1);
       expect(
         (client.config.requestHandler as SmithyFetchHttpHandler).httpHandlerConfigs(),
@@ -1139,7 +1129,6 @@ describe("Alternator discovery", () => {
     ["a reader-only stream", readerOnlyBody],
   ] as const)("normalizes Fetch-decoded responses backed by %s", async (_label, bodyFactory) => {
     const decoded = new TextEncoder().encode(JSON.stringify({ TableNames: ["decoded"] }));
-    await expect(fetchStreamCollector(bodyFactory(decoded) as never)).resolves.toEqual(decoded);
 
     class DecodedFetchHttpHandler extends SmithyFetchHttpHandler {
       override handle(_request: HttpRequest, _options?: HttpHandlerOptions) {

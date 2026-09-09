@@ -3,28 +3,18 @@ SHELL := bash
 .SHELLFLAGS := -eo pipefail -c
 
 MAKEFILE_PATH := $(abspath $(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
-BIN := $(MAKEFILE_PATH)/bin
-OS := $(shell uname | tr '[:upper:]' '[:lower:]')
-ARCH := $(shell uname -m)
-DOCKER_COMPOSE_VERSION := 2.34.0
+SCYLLA_SOURCE_IMAGE := scylladb/scylla:2025.1@sha256:07f68389d5bb05c5647662a81f78ad6d5fa44d3fbb7bb54a8c060dac8a4f6561
+SCYLLA_CACHE_IMAGE := alternator-client-cache/scylla:2025.1-07f68389
+SCYLLA_AMD64_IMAGE_ID := sha256:3388da7b9cfcd226564a23da9f58750cd42daea28231144f32ff51b8c836d9d4
+SCYLLA_ARM64_IMAGE_ID := sha256:63d041d89d5f2fb4f56766c0df18a0c424ba425528bd76b05c230e60fb7a6542
+COMPOSE := SCYLLA_IMAGE=$(SCYLLA_CACHE_IMAGE) docker compose -f $(MAKEFILE_PATH)/test/docker-compose.yml
 
-ifeq ($(ARCH),aarch64)
-	DOCKER_COMPOSE_DOWNLOAD_URL := "https://github.com/docker/compose/releases/download/v$(DOCKER_COMPOSE_VERSION)/docker-compose-$(OS)-aarch64"
-else ifeq ($(ARCH),x86_64)
-	DOCKER_COMPOSE_DOWNLOAD_URL := "https://github.com/docker/compose/releases/download/v$(DOCKER_COMPOSE_VERSION)/docker-compose-$(OS)-x86_64"
-else
-	$(error Unknown architecture "$(ARCH)")
-endif
-
-COMPOSE = bin/docker-compose -f $(MAKEFILE_PATH)/test/docker-compose.yml
-
-SCYLLA_IMAGE := scylladb/scylla:2025.1
 DOCKER_CACHE_DIR := $(MAKEFILE_PATH)/.docker-cache
 DOCKER_CACHE_FILE := $(DOCKER_CACHE_DIR)/scylla-image.tar
 CERT_CACHE_DIR := $(MAKEFILE_PATH)/.cert-cache
 CERT_DIR := $(MAKEFILE_PATH)/test/scylla
 
-.PHONY: clean verify lint lint-fix test-unit test-integration test-all wait-for-alternator scylla-start scylla-stop scylla-kill scylla-rm docker-pull docker-cache-save docker-cache-load cert-cache-save cert-cache-load
+.PHONY: clean verify lint lint-fix test-unit test-integration test-all wait-for-alternator scylla-start scylla-stop scylla-kill scylla-rm docker-pull docker-cache-save docker-cache-load verify-docker-image cert-cache-save cert-cache-load
 
 clean:
 	rm -rf dist
@@ -72,17 +62,8 @@ test-all: test-integration
 		echo 2097152 | sudo tee /proc/sys/fs/aio-max-nr >/dev/null; \
 	fi
 
-.prepare-docker-compose: .prepare-bin
-	@if [[ -f "$(BIN)/docker-compose" ]] && "$(BIN)/docker-compose" --version 2>/dev/null | grep "$(DOCKER_COMPOSE_VERSION)" >/dev/null; then \
-		echo "docker-compose $(DOCKER_COMPOSE_VERSION) is already installed"; \
-	else \
-		echo "Downloading $(BIN)/docker-compose"; \
-		curl --progress-bar -L $(DOCKER_COMPOSE_DOWNLOAD_URL) --output "$(BIN)/docker-compose"; \
-		chmod +x "$(BIN)/docker-compose"; \
-	fi
-
-.prepare-bin:
-	@[ -d "$(BIN)" ] || mkdir "$(BIN)"
+.prepare-docker-compose:
+	@docker compose version >/dev/null
 
 .prepare-cert:
 	@[ -f "$(CERT_DIR)/db.key" ] || ( \
@@ -94,7 +75,7 @@ test-all: test-integration
 	)
 
 scylla-start: cert-cache-load .prepare-docker-compose .prepare-environment-update-aio-max-nr docker-cache-load
-	$(COMPOSE) up -d
+	$(COMPOSE) up -d --pull never
 
 scylla-stop: .prepare-docker-compose
 	$(COMPOSE) down
@@ -106,19 +87,37 @@ scylla-rm: .prepare-docker-compose
 	$(COMPOSE) rm -f
 
 docker-pull:
-	docker pull $(SCYLLA_IMAGE)
+	docker pull $(SCYLLA_SOURCE_IMAGE)
+	docker tag $(SCYLLA_SOURCE_IMAGE) $(SCYLLA_CACHE_IMAGE)
+	$(MAKE) verify-docker-image
 
 docker-cache-save: docker-pull
 	@mkdir -p $(DOCKER_CACHE_DIR)
-	docker save $(SCYLLA_IMAGE) -o $(DOCKER_CACHE_FILE)
+	docker save $(SCYLLA_CACHE_IMAGE) -o $(DOCKER_CACHE_FILE)
 
 docker-cache-load:
 	@if [ -f "$(DOCKER_CACHE_FILE)" ]; then \
 		echo "Loading Docker image from cache..."; \
 		docker load -i "$(DOCKER_CACHE_FILE)"; \
+		$(MAKE) verify-docker-image; \
 	else \
 		echo "Cache file not found, pulling image..."; \
 		$(MAKE) docker-pull; \
+	fi
+
+verify-docker-image:
+	@architecture=$$(docker image inspect --format '{{.Architecture}}' $(SCYLLA_CACHE_IMAGE)); \
+	image_id=$$(docker image inspect --format '{{.Id}}' $(SCYLLA_CACHE_IMAGE)); \
+	case "$$architecture" in \
+		amd64) expected_id=$(SCYLLA_AMD64_IMAGE_ID) ;; \
+		arm64) expected_id=$(SCYLLA_ARM64_IMAGE_ID) ;; \
+		*) echo "Unsupported cached ScyllaDB image architecture: $$architecture"; exit 1 ;; \
+	esac; \
+	if [ "$$image_id" != "$$expected_id" ]; then \
+		echo "Cached ScyllaDB image ID mismatch for $$architecture"; \
+		echo "Expected: $$expected_id"; \
+		echo "Actual:   $$image_id"; \
+		exit 1; \
 	fi
 
 cert-cache-save: .prepare-cert

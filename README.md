@@ -18,7 +18,8 @@ npm install @scylladb/alternator-client @aws-sdk/client-dynamodb
 
 For document commands, also install `@aws-sdk/lib-dynamodb`.
 
-Node.js 20 or newer is required for the Node runtime.
+Node.js 22 or newer is required for the Node runtime. Continuous integration
+tests the package on Node.js 22 and 24.
 
 The package uses conditional exports. Node resolves the Node build; browser,
 worker, and default ESM conditions resolve the Edge build, which contains no
@@ -33,6 +34,10 @@ For document commands in an Edge bundle, use:
 ```ts
 import { AlternatorDynamoDBDocumentClient } from "@scylladb/alternator-client/document/edge";
 ```
+
+The integration suite uses ScyllaDB 2025.1 as its compatibility baseline. This
+records the version tested for this release; it is not a blanket compatibility
+guarantee for every ScyllaDB release.
 
 ## Low-Level Client
 
@@ -93,6 +98,8 @@ await docClient.send(
     Item: { id: "u1", name: "Ada" },
   }),
 );
+
+docClient.destroy();
 ```
 
 AWS-style wrapping is the primary API when you already have a low-level client:
@@ -100,10 +107,18 @@ AWS-style wrapping is the primary API when you already have a low-level client:
 ```ts
 const base = new AlternatorDynamoDBClient({ seeds: ["localhost"] });
 const docClient = AlternatorDynamoDBDocumentClient.from(base);
+
+// The wrapper does not own base, so destroy it separately when finished.
+docClient.destroy();
+base.destroy();
 ```
 
 `.from(normalClient)` is wrap-only. It does not add Alternator discovery or load
 balancing unless the passed client is already an `AlternatorDynamoDBClient`.
+The caller retains ownership of the supplied client, and destroying the document
+wrapper does not destroy it. In contrast, `.fromConfig()` creates and owns an
+`AlternatorDynamoDBClient`; destroying that document client also stops its
+background discovery and destroys its HTTP resources.
 
 ## Alternator APIs
 
@@ -184,6 +199,7 @@ new AlternatorDynamoDBClient({
 
   headerOptimization: {
     allowedHeaders: ["Host", "X-Amz-Target", "Content-Length", "Accept-Encoding", "Content-Encoding"],
+    additionalAllowedHeaders: ["X-Request-Id"],
   },
 
   userAgent: { append: "my-app/1.2.3" },
@@ -198,6 +214,8 @@ new AlternatorDynamoDBClient({
 
   tls: {
     ca: { file: "/etc/ssl/scylla-ca.pem" },
+    cert: { file: "/etc/ssl/client-cert.pem" },
+    key: { file: "/etc/ssl/client-key.pem" },
     rejectUnauthorized: true,
     sessionCache: true,
   },
@@ -205,6 +223,7 @@ new AlternatorDynamoDBClient({
   connection: {
     keepAlive: true,
     maxSockets: 50,
+    throwOnRequestTimeout: true,
     timeouts: {
       connectMs: 1_000,
       requestMs: 0,
@@ -227,6 +246,16 @@ whitelist is `Host`, `X-Amz-Target`, `Content-Length`, `Accept-Encoding`, and
 `sessionToken` is not sent even when provided in credentials. The Alternator
 `User-Agent` is applied after this filter, so it is kept unless
 `userAgent: false` is configured.
+
+Use `allowedHeaders` to replace the default whitelist. Use
+`additionalAllowedHeaders` to extend the default (or explicitly supplied)
+whitelist without repeating it:
+
+```ts
+headerOptimization: {
+  additionalAllowedHeaders: ["X-Request-Id"],
+}
+```
 
 By default, the client replaces the AWS SDK `User-Agent` with the ScyllaDB
 Alternator client identity:
@@ -252,6 +281,20 @@ new AlternatorDynamoDBClient({
   userAgent: { append: "my-app/4.5.6" },
 });
 ```
+
+Or transform the generated value. Returning `null`, `undefined`, or a blank
+string removes the header:
+
+```ts
+new AlternatorDynamoDBClient({
+  seeds: ["scylla-0.internal"],
+  userAgent: {
+    transform: (generated) => `${generated} my-app/4.5.6`,
+  },
+});
+```
+
+`value`, `append`, and `transform` are mutually exclusive.
 
 Use `userAgent: false` to remove the header entirely.
 
@@ -295,6 +338,41 @@ When enabled, the client sends `Accept-Encoding` and transparently decodes
 header optimization uses a custom whitelist, keep `Accept-Encoding` and
 `Content-Encoding` in that list.
 
+### TLS and HTTP transport
+
+Node TLS configuration accepts CA certificates, client certificates, and client
+keys. Each `ca`, `cert`, or `key` value uses exactly one material form:
+
+```ts
+tls: {
+  ca: { file: "/etc/ssl/scylla-ca.pem" },
+  cert: { text: process.env.SCYLLA_CLIENT_CERT_PEM! },
+  key: { bytes: clientKeyBytes },
+  rejectUnauthorized: true,
+  sessionCache: true,
+}
+```
+
+`file` is a filesystem path, `text` is PEM text, and `bytes` is a
+`Uint8Array`. TLS material and session-cache tuning are Node-only. Prefer
+`rejectUnauthorized: true`; disabling certificate verification is unsafe.
+
+The built-in Node handler supports `connection.keepAlive`,
+`connection.maxSockets`, `connection.timeouts.connectMs`,
+`connection.timeouts.requestMs`, `connection.timeouts.socketMs`, and
+`connection.throwOnRequestTimeout`. Additional Smithy `NodeHttpHandlerOptions`
+can be passed through `connection.node`, except `httpAgent` and `httpsAgent`;
+configure pooling and TLS through `connection` and `tls` instead.
+
+The Edge handler supports `connection.keepAlive`,
+`connection.timeouts.requestMs`, and additional `FetchHttpHandlerOptions`
+through `connection.fetch`. The top-level AWS SDK-compatible `requestHandler`
+option accepts a handler instance, a Smithy options-provider function, or a
+handler options object for the selected runtime. An options object is merged
+with the Alternator `connection` and `tls` settings. A supplied handler instance
+or options-provider function bypasses those generated settings and therefore
+owns its transport configuration.
+
 Key-route affinity supports these modes:
 
 ```ts
@@ -316,9 +394,16 @@ candidate can vote. If one table lacks partition-key metadata and
 `autoDiscoverPartitionKeys` is enabled, the client starts a background
 `DescribeTable` lookup for that table while other usable tables can still vote.
 
-Per request, the client creates a lazy node query plan. Retries can consume the
-next node from that plan, so active nodes are tried without repeating until the
-plan is exhausted.
+Per request, the client creates a lazy node query plan. When the AWS retry
+strategy retries a transport failure or retryable service response, the next
+attempt consumes the next node from that plan. Active nodes are tried without
+repeating until the plan is exhausted; additional attempts start another plan.
+
+The client does not maintain a persistent dead-node quarantine, subscribe to
+topology events, or health-rank nodes across requests. A failed node can be
+selected by a later request until a discovery refresh returns a node list that
+does not include it. Topology changes are therefore learned through scheduled,
+request-triggered, or manual `/localnodes` refreshes.
 
 ## Development
 
@@ -351,3 +436,6 @@ certificate path.
 `make test-all` starts the same three-node ScyllaDB Docker cluster shape used by
 the Java client tests, waits for Alternator, runs `npm run test:integration`
 with the required environment variables, and stops the cluster.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow and
+[RELEASING.md](RELEASING.md) for the maintainer release procedure.

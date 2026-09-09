@@ -20,6 +20,7 @@ import globals from "globals";
 import tseslint from "typescript-eslint";
 
 const tsFiles = ["src/**/*.ts", "test/**/*.ts", "vitest.config.ts", "vitest.integration.config.ts", "tsup.config.ts"];
+const jsFiles = ["*.js", "scripts/**/*.mjs"];
 const licenseHeader = [
   "/*",
   " * Copyright ScyllaDB, Inc.",
@@ -47,7 +48,7 @@ export default tseslint.config(
     ],
   },
   {
-    files: ["**/*.{js,ts}"],
+    files: ["**/*.{js,mjs,ts}"],
     plugins: {
       "license-header": licenseHeaderPlugin,
     },
@@ -57,7 +58,7 @@ export default tseslint.config(
   },
   {
     ...js.configs.recommended,
-    files: ["*.js"],
+    files: jsFiles,
     languageOptions: {
       globals: {
         ...globals.node,
