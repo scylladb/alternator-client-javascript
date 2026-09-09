@@ -93,16 +93,25 @@ export function mapFetchDecodedResponse(response: HttpResponse): HttpResponse {
   });
 }
 
-export async function bodyToReadableStream(body: unknown): Promise<ReadableStream> {
-  if (typeof ReadableStream !== "undefined" && body instanceof ReadableStream) {
-    return body;
+export async function bodyToReadableStream(body: unknown): Promise<ReadableStream<BufferSource>> {
+  if (isUsableReadableStream(body)) {
+    return body as ReadableStream<BufferSource>;
   }
-  if (typeof Blob !== "undefined" && body instanceof Blob) {
-    return body.stream();
+  let readableFallback: ReadableStreamLike | undefined;
+  if (isStreamableBody(body)) {
+    const stream = body.stream();
+    if (isUsableReadableStream(stream)) {
+      return stream as ReadableStream<BufferSource>;
+    }
+    if (isReadableStreamLike(stream)) {
+      readableFallback = stream;
+    }
   }
 
-  const bytes = await bodyToAsyncBytes(body);
-  return new Blob([bytesToArrayBuffer(bytes)]).stream();
+  const bytes = readableFallback
+    ? await collectReadableStream(readableFallback)
+    : await bodyToAsyncBytes(body);
+  return bytesToReadableStream(bytes);
 }
 
 export async function bodyToAsyncBytes(body: unknown): Promise<Uint8Array> {
@@ -110,11 +119,17 @@ export async function bodyToAsyncBytes(body: unknown): Promise<Uint8Array> {
   if (bytes) {
     return bytes;
   }
-  if (typeof Blob !== "undefined" && body instanceof Blob) {
+  if (isArrayBufferBody(body)) {
     return new Uint8Array(await body.arrayBuffer());
   }
-  if (typeof ReadableStream !== "undefined" && body instanceof ReadableStream) {
-    return new Uint8Array(await new Response(body).arrayBuffer());
+  if (isReadableStreamLike(body)) {
+    return collectReadableStream(body);
+  }
+  if (isStreamableBody(body)) {
+    const stream = body.stream();
+    if (isReadableStreamLike(stream)) {
+      return collectReadableStream(stream);
+    }
   }
   if (isTransformableByteBody(body)) {
     return body.transformToByteArray();
@@ -210,6 +225,88 @@ function bytesToArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   const copy = new Uint8Array(bytes.byteLength);
   copy.set(bytes);
   return copy.buffer;
+}
+
+function bytesToReadableStream(bytes: Uint8Array): ReadableStream<BufferSource> {
+  if (typeof ReadableStream !== "undefined") {
+    const copy = new Uint8Array(bytesToArrayBuffer(bytes));
+    return new ReadableStream<BufferSource>({
+      start(controller) {
+        controller.enqueue(copy);
+        controller.close();
+      },
+    });
+  }
+  if (typeof Blob !== "undefined") {
+    return new Blob([bytesToArrayBuffer(bytes)]).stream();
+  }
+  throw new Error("compressed response body is not readable");
+}
+
+interface ReadableStreamLike {
+  getReader(): {
+    read(): Promise<{ done?: boolean; value?: unknown }>;
+    cancel?(reason?: unknown): unknown;
+    releaseLock?(): void;
+  };
+}
+
+async function collectReadableStream(stream: ReadableStreamLike): Promise<Uint8Array> {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      chunks.push(chunkToBytes(value));
+    }
+  } catch (error) {
+    try {
+      await reader.cancel?.(error);
+    } catch (_cancelError) {
+      // Preserve the stream read error.
+    }
+    throw error;
+  } finally {
+    reader.releaseLock?.();
+  }
+  return concatBytes(chunks);
+}
+
+function isReadableStreamLike(body: unknown): body is ReadableStreamLike {
+  return (
+    isObject(body) &&
+    "getReader" in body &&
+    typeof (body as { getReader?: unknown }).getReader === "function"
+  );
+}
+
+function isUsableReadableStream(body: unknown): boolean {
+  return (
+    isReadableStreamLike(body) &&
+    "tee" in body &&
+    typeof (body as { tee?: unknown }).tee === "function" &&
+    "pipeThrough" in body &&
+    typeof (body as { pipeThrough?: unknown }).pipeThrough === "function"
+  );
+}
+
+function isArrayBufferBody(body: unknown): body is { arrayBuffer(): Promise<ArrayBuffer> } {
+  return (
+    isObject(body) &&
+    "arrayBuffer" in body &&
+    typeof (body as { arrayBuffer?: unknown }).arrayBuffer === "function"
+  );
+}
+
+function isStreamableBody(body: unknown): body is { stream(): unknown } {
+  return (
+    isObject(body) &&
+    "stream" in body &&
+    typeof (body as { stream?: unknown }).stream === "function"
+  );
 }
 
 function isTransformableByteBody(body: unknown): body is {

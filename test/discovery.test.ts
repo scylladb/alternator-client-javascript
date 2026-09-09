@@ -14,18 +14,23 @@
  * limitations under the License.
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { AlternatorDynamoDBClient, routing } from "../src/index.js";
 import { AlternatorDynamoDBClient as EdgeAlternatorDynamoDBClient } from "../src/edge.js";
 import { RecordingHandler } from "./helpers.js";
 import { ListTablesCommand } from "@aws-sdk/client-dynamodb";
-import type { FetchHttpHandler as SmithyFetchHttpHandler } from "@smithy/fetch-http-handler";
+import {
+  FetchHttpHandler as SmithyFetchHttpHandler,
+  streamCollector as fetchStreamCollector,
+} from "@smithy/fetch-http-handler";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
+import { HttpResponse, type HttpRequest } from "@smithy/protocol-http";
+import type { HttpHandlerOptions } from "@smithy/types";
 import { Agent, createServer, type Server } from "node:http";
 import type { LookupAddress } from "node:dns";
 import type { AddressInfo, LookupFunction } from "node:net";
 import { fileURLToPath } from "node:url";
-import { gzipSync } from "node:zlib";
+import { deflateSync, gzipSync } from "node:zlib";
 
 const missingDatacenterQuery = { dc: "__alternator_client_missing_dc__" };
 const missingRackQuery = { rack: "__alternator_client_missing_rack__" };
@@ -746,6 +751,71 @@ describe("Alternator discovery", () => {
     }
   });
 
+  it("preserves opaque decoded bodies from an explicitly configured Fetch handler", async () => {
+    const decoded = new TextEncoder().encode(JSON.stringify({ TableNames: ["decoded"] }));
+    const LegacyBlob = class Blob {
+      constructor(readonly bytes: Uint8Array) {}
+    };
+    class LegacyFileReader {
+      readyState = 0;
+      result: string | null = null;
+      onloadend: (() => void) | null = null;
+
+      readAsDataURL(blob: InstanceType<typeof LegacyBlob>): void {
+        this.readyState = 2;
+        this.result = `data:application/octet-stream;base64,${Buffer.from(blob.bytes).toString("base64")}`;
+        this.onloadend?.();
+      }
+    }
+    const handle = vi.spyOn(SmithyFetchHttpHandler.prototype, "handle");
+    let client: EdgeAlternatorDynamoDBClient | undefined;
+
+    try {
+      vi.stubGlobal("Blob", LegacyBlob);
+      vi.stubGlobal("FileReader", LegacyFileReader);
+      vi.stubGlobal("fetch", (request: Request): Promise<Response> => {
+        if (new URL(request.url).pathname === "/localnodes") {
+          return Promise.resolve({
+            headers: new Headers({ "content-type": "application/json" }),
+            body: '["seed"]',
+            status: 200,
+            statusText: "OK",
+          } as unknown as Response);
+        }
+        return Promise.resolve({
+          headers: new Headers({
+            "content-type": "application/x-amz-json-1.0",
+            "content-encoding": "gzip",
+          }),
+          body: undefined,
+          blob: () => Promise.resolve(new LegacyBlob(decoded)),
+          status: 200,
+          statusText: "OK",
+        } as unknown as Response);
+      });
+      const opaqueBody = new LegacyBlob(decoded);
+      await expect(fetchStreamCollector(opaqueBody as never)).resolves.toEqual(decoded);
+      client = new EdgeAlternatorDynamoDBClient({
+        seeds: ["seed"],
+        runtime: "edge",
+        requestHandler: new SmithyFetchHttpHandler(),
+        streamCollector: fetchStreamCollector,
+        discovery: { background: false, requestRefreshIntervalMs: 0 },
+        compression: { response: { algorithms: ["gzip"] } },
+        maxAttempts: 1,
+      });
+
+      await client.alternator.refreshNodes();
+      await expect(client.send(new ListTablesCommand({}))).resolves.toMatchObject({
+        TableNames: ["decoded"],
+      });
+    } finally {
+      client?.destroy();
+      handle.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("merges Fetch handler options with edge connection settings", async () => {
     let requestInitCalls = 0;
     const server = createServer((request, response) => {
@@ -788,6 +858,167 @@ describe("Alternator discovery", () => {
     } finally {
       client.destroy();
       await close(server);
+    }
+  });
+
+  it("normalizes Fetch-decoded responses from a handler with another constructor", async () => {
+    const compressed = gzipSync(JSON.stringify({ TableNames: ["decoded"] }));
+    const server = createServer((request, response) => {
+      request.resume();
+      response.setHeader("content-type", "application/x-amz-json-1.0");
+      response.setHeader("content-encoding", "gzip");
+      response.end(compressed);
+    });
+    const address = await listen(server);
+    const delegate = new SmithyFetchHttpHandler();
+    const DuplicateFetchHttpHandler = class FetchHttpHandler {
+      handle(request: HttpRequest, options?: HttpHandlerOptions) {
+        return delegate.handle(request, options);
+      }
+
+      destroy(): void {
+        delegate.destroy();
+      }
+
+      updateHttpClientConfig(...args: Parameters<typeof delegate.updateHttpClientConfig>): void {
+        delegate.updateHttpClientConfig(...args);
+      }
+
+      httpHandlerConfigs(): ReturnType<typeof delegate.httpHandlerConfigs> {
+        return delegate.httpHandlerConfigs();
+      }
+    };
+    const originalDecompressionStream = globalThis.DecompressionStream;
+    vi.stubGlobal("DecompressionStream", undefined);
+    let client: EdgeAlternatorDynamoDBClient | undefined;
+
+    try {
+      client = new EdgeAlternatorDynamoDBClient({
+        seeds: [address.address],
+        port: address.port,
+        runtime: "edge",
+        requestHandler: new DuplicateFetchHttpHandler(),
+        discovery: { background: false, requestRefreshIntervalMs: 0 },
+        compression: { response: { algorithms: ["gzip"] } },
+        maxAttempts: 1,
+      });
+      await expect(client.send(new ListTablesCommand({}))).resolves.toMatchObject({
+        TableNames: ["decoded"],
+      });
+    } finally {
+      client?.destroy();
+      vi.stubGlobal("DecompressionStream", originalDecompressionStream);
+      await close(server);
+    }
+  });
+
+  it.each([
+    ["a cross-realm Blob", foreignBlobBody],
+    ["a reader-only stream", readerOnlyBody],
+  ] as const)("normalizes Fetch-decoded responses backed by %s", async (_label, bodyFactory) => {
+    const decoded = new TextEncoder().encode(JSON.stringify({ TableNames: ["decoded"] }));
+    await expect(fetchStreamCollector(bodyFactory(decoded) as never)).resolves.toEqual(decoded);
+
+    class DecodedFetchHttpHandler extends SmithyFetchHttpHandler {
+      override handle(_request: HttpRequest, _options?: HttpHandlerOptions) {
+        return Promise.resolve({
+          response: new HttpResponse({
+            statusCode: 200,
+            headers: {
+              "content-type": "application/x-amz-json-1.0",
+              "content-encoding": "gzip",
+            },
+            body: bodyFactory(decoded),
+          }),
+        });
+      }
+    }
+
+    const originalDecompressionStream = globalThis.DecompressionStream;
+    vi.stubGlobal("DecompressionStream", undefined);
+    const client = new EdgeAlternatorDynamoDBClient({
+      seeds: ["seed"],
+      runtime: "edge",
+      requestHandler: new DecodedFetchHttpHandler(),
+      streamCollector: fetchStreamCollector,
+      discovery: { background: false, requestRefreshIntervalMs: 0 },
+      compression: { response: { algorithms: ["gzip"] } },
+      maxAttempts: 1,
+    });
+
+    try {
+      await expect(client.send(new ListTablesCommand({}))).resolves.toMatchObject({
+        TableNames: ["decoded"],
+      });
+    } finally {
+      client.destroy();
+      vi.stubGlobal("DecompressionStream", originalDecompressionStream);
+    }
+  });
+
+  it.each([
+    ["gzip", gzipSync],
+    ["deflate", deflateSync],
+  ] as const)("decodes raw %s from a custom handler named FetchHttpHandler", async (encoding, compress) => {
+    const compressed = compress(JSON.stringify({ TableNames: ["decoded"] }));
+    const RawFetchHttpHandler = class FetchHttpHandler extends RecordingHandler {};
+    const client = new EdgeAlternatorDynamoDBClient({
+      seeds: ["seed"],
+      runtime: "edge",
+      requestHandler: new RawFetchHttpHandler(() => new HttpResponse({
+        statusCode: 200,
+        headers: {
+          "content-type": "application/x-amz-json-1.0",
+          "content-encoding": encoding,
+          "content-length": String(compressed.byteLength),
+        },
+        body: bytewiseReadableStream(compressed),
+      })),
+      discovery: { background: false, requestRefreshIntervalMs: 0 },
+      compression: { response: { algorithms: [encoding] } },
+      maxAttempts: 1,
+    });
+
+    try {
+      await expect(client.send(new ListTablesCommand({}))).resolves.toMatchObject({
+        TableNames: ["decoded"],
+      });
+    } finally {
+      client.destroy();
+    }
+  });
+
+  it("decodes raw compression from a custom FetchHttpHandler subclass", async () => {
+    const compressed = gzipSync(JSON.stringify({ TableNames: ["decoded"] }));
+    class RawFetchHttpHandler extends SmithyFetchHttpHandler {
+      override handle(_request: HttpRequest, _options?: HttpHandlerOptions) {
+        return Promise.resolve({
+          response: new HttpResponse({
+            statusCode: 200,
+            headers: {
+              "content-type": "application/x-amz-json-1.0",
+              "content-encoding": "gzip",
+            },
+            body: bytewiseReadableStream(compressed),
+          }),
+        });
+      }
+    }
+    const client = new EdgeAlternatorDynamoDBClient({
+      seeds: ["seed"],
+      runtime: "edge",
+      requestHandler: new RawFetchHttpHandler(),
+      discovery: { background: false, requestRefreshIntervalMs: 0 },
+      compression: { response: { algorithms: ["gzip"] } },
+      maxAttempts: 1,
+    });
+
+    try {
+      await expect(client.send(new ListTablesCommand({}))).resolves.toMatchObject({
+        TableNames: ["decoded"],
+      });
+    } finally {
+      client.destroy();
     }
   });
 
@@ -861,6 +1092,48 @@ function close(server: Server): Promise<void> {
       resolve();
     });
   });
+}
+
+function bytewiseReadableStream(bytes: Uint8Array): ReadableStream<Uint8Array> {
+  let offset = 0;
+  return new ReadableStream({
+    pull(controller) {
+      if (offset >= bytes.byteLength) {
+        controller.close();
+        return;
+      }
+      controller.enqueue(bytes.subarray(offset, offset + 1));
+      offset += 1;
+    },
+  });
+}
+
+function foreignBlobBody(bytes: Uint8Array): unknown {
+  const ForeignBlob = class Blob {
+    constructor(private readonly body: Uint8Array) {}
+
+    arrayBuffer(): Promise<ArrayBuffer> {
+      return Promise.resolve(new Uint8Array(this.body).buffer);
+    }
+  };
+  return new ForeignBlob(bytes);
+}
+
+function readerOnlyBody(bytes: Uint8Array): unknown {
+  let emitted = false;
+  return {
+    getReader() {
+      return {
+        read(): Promise<{ done: boolean; value?: Uint8Array }> {
+          if (emitted) {
+            return Promise.resolve({ done: true });
+          }
+          emitted = true;
+          return Promise.resolve({ done: false, value: bytes });
+        },
+      };
+    },
+  };
 }
 
 function dualStackHandler(addresses: LookupAddress[]): NodeHttpHandler {

@@ -17,7 +17,11 @@
 import { FetchHttpHandler } from "@smithy/fetch-http-handler";
 import type { HttpHandlerUserInput } from "@smithy/protocol-http";
 import type { FetchHttpHandlerOptions } from "@smithy/types";
-import { compressBody, decompressResponse, normalizeFetchResponse } from "./compression-edge.js";
+import {
+  compressBody,
+  decompressOrNormalizeResponse,
+  normalizeFetchResponse,
+} from "./compression-edge.js";
 import {
   isHttpHandlerInstance,
   mergeDefinedOptions,
@@ -68,24 +72,24 @@ function createRequestHandler(
   config: NormalizedAlternatorConfig,
 ): HttpHandlerUserInput {
   const configuredHandler = input.requestHandler;
+  const configuredHandlerIsInstance = isHttpHandlerInstance(configuredHandler);
+  const stockFetchHandler = configuredHandlerIsInstance && isStockFetchHttpHandler(configuredHandler);
   const requestHandler = isHttpHandlerInstance(configuredHandler) || typeof configuredHandler === "function"
     ? FetchHttpHandler.create(configuredHandler as Parameters<typeof FetchHttpHandler.create>[0])
     : createFetchHttpHandler(config, configuredHandler as FetchHttpHandlerOptions | undefined);
-  const responseDecompressor = requestHandler instanceof FetchHttpHandler
-    ? normalizeFetchResponse
-    : decompressResponse;
-  if (
-    config.compression.response.enabled &&
-    responseDecompressor === decompressResponse &&
-    typeof DecompressionStream === "undefined"
-  ) {
-    throw new Error("Alternator edge runtime response compression with a custom HTTP handler requires DecompressionStream support");
-  }
+  const responseDecompressor = requestHandler === configuredHandler && !stockFetchHandler
+    ? decompressOrNormalizeResponse
+    : normalizeFetchResponse;
   return withResponseCompression(
     requestHandler,
     config.compression.response.enabled,
     responseDecompressor,
   );
+}
+
+function isStockFetchHttpHandler(requestHandler: HttpHandlerUserInput): boolean {
+  return requestHandler instanceof FetchHttpHandler &&
+    requestHandler.handle === FetchHttpHandler.prototype.handle;
 }
 
 function createFetchHttpHandler(

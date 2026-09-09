@@ -151,7 +151,9 @@ least one seed per datacenter.
 | Gzip request compression | Yes | Only with `CompressionStream` |
 | Gzip/deflate response compression | Yes | Yes; custom raw HTTP handlers require `DecompressionStream` |
 
-Unsupported edge combinations throw at construction time with clear errors.
+Unsupported edge options that can be detected statically throw at construction
+time. A custom raw handler reports a missing `DecompressionStream` when it
+receives an encoded response.
 
 ## Options
 
