@@ -23,6 +23,7 @@ import {
   normalizeFetchResponse,
 } from "./compression-edge.js";
 import {
+  type ConfiguredRequestHandler,
   isHttpHandlerInstance,
   mergeDefinedOptions,
   withResponseCompression,
@@ -70,7 +71,7 @@ function assertRuntimeSupport(config: NormalizedAlternatorConfig): void {
 function createRequestHandler(
   input: AlternatorDynamoDBClientConfig,
   config: NormalizedAlternatorConfig,
-): HttpHandlerUserInput {
+): ConfiguredRequestHandler {
   const configuredHandler = input.requestHandler;
   const configuredHandlerIsInstance = isHttpHandlerInstance(configuredHandler);
   const stockFetchHandler = configuredHandlerIsInstance && isStockFetchHttpHandler(configuredHandler);
@@ -80,11 +81,14 @@ function createRequestHandler(
   const responseDecompressor = requestHandler === configuredHandler && !stockFetchHandler
     ? decompressOrNormalizeResponse
     : normalizeFetchResponse;
-  return withResponseCompression(
-    requestHandler,
-    config.compression.response.enabled,
-    responseDecompressor,
-  );
+  return {
+    requestHandler: withResponseCompression(
+      requestHandler,
+      config.compression.response.enabled,
+      responseDecompressor,
+    ),
+    forwardDiscoveryRequestTimeout: configuredHandlerIsInstance && !stockFetchHandler,
+  };
 }
 
 function isStockFetchHttpHandler(requestHandler: HttpHandlerUserInput): boolean {

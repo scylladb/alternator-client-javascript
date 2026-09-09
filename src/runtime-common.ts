@@ -23,6 +23,11 @@ import type {
 type GenericHttpHandler = HttpHandler<Record<string, unknown>>;
 export type ResponseDecompressor = (response: HttpResponse) => Promise<HttpResponse>;
 
+export interface ConfiguredRequestHandler {
+  readonly requestHandler: HttpHandlerUserInput;
+  readonly forwardDiscoveryRequestTimeout: boolean;
+}
+
 class ResponseCompressionHttpHandler implements GenericHttpHandler {
   readonly metadata: RequestHandlerMetadata;
 
@@ -75,8 +80,7 @@ export function withResponseCompression(
 
 export function isHttpHandlerInstance(requestHandler: unknown): requestHandler is GenericHttpHandler {
   return (
-    typeof requestHandler === "object" &&
-    requestHandler !== null &&
+    isObjectOrFunction(requestHandler) &&
     "handle" in requestHandler &&
     typeof (requestHandler as { handle?: unknown }).handle === "function"
   );
@@ -97,8 +101,7 @@ export function mergeDefinedOptions<T extends object>(base: T, overrides: T | un
 
 function isHttpHandler(requestHandler: HttpHandlerUserInput): requestHandler is GenericHttpHandler {
   return (
-    typeof requestHandler === "object" &&
-    requestHandler !== null &&
+    isObjectOrFunction(requestHandler) &&
     "handle" in requestHandler &&
     typeof (requestHandler as { handle?: unknown }).handle === "function" &&
     "updateHttpClientConfig" in requestHandler &&
@@ -106,4 +109,8 @@ function isHttpHandler(requestHandler: HttpHandlerUserInput): requestHandler is 
     "httpHandlerConfigs" in requestHandler &&
     typeof (requestHandler as { httpHandlerConfigs?: unknown }).httpHandlerConfigs === "function"
   );
+}
+
+function isObjectOrFunction(value: unknown): value is object {
+  return value !== null && (typeof value === "object" || typeof value === "function");
 }

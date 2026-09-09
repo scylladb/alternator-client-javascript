@@ -772,6 +772,132 @@ describe("Alternator discovery", () => {
     }
   });
 
+  it("releases foreground discovery and stops trying seeds when destroyed", async () => {
+    const timeoutMs = 31_338;
+    let requestStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      requestStarted = resolve;
+    });
+    const response = new Promise<never>(() => undefined);
+    let requestCount = 0;
+    let requestSignal: { readonly aborted: boolean } | undefined;
+    let handlerRequestTimeout: number | undefined;
+    const handler = new RecordingHandler((_request, options) => {
+      requestCount += 1;
+      requestSignal = options?.abortSignal;
+      handlerRequestTimeout = options?.requestTimeout;
+      requestStarted();
+      return response;
+    });
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    const client = new AlternatorDynamoDBClient({
+      seeds: ["seed-a", "seed-b"],
+      requestHandler: handler,
+      discovery: { background: false, timeoutMs },
+    });
+    const refresh = client.alternator.refreshNodes();
+
+    try {
+      await started;
+      const deadline = setTimeoutSpy.mock.results.find(
+        (_result, index) => setTimeoutSpy.mock.calls[index]?.[1] === timeoutMs,
+      )?.value as ReturnType<typeof setTimeout> | undefined;
+      expect(deadline?.hasRef?.()).toBe(true);
+      expect(handlerRequestTimeout).toBe(timeoutMs);
+
+      client.destroy();
+      expect(deadline?.hasRef?.()).toBe(false);
+      expect(requestSignal?.aborted).toBe(true);
+
+      await refresh;
+      expect(requestCount).toBe(1);
+    } finally {
+      client.destroy();
+      setTimeoutSpy.mockRestore();
+    }
+  });
+
+  it("forwards discovery deadlines to callable custom handlers for transport cleanup", async () => {
+    const timeoutMs = 20;
+    const handlerTimeouts: Array<number | undefined> = [];
+    let activeRequests = 0;
+    const handler = Object.assign(
+      () => undefined,
+      {
+        handle: (_request: HttpRequest, options?: HttpHandlerOptions) => {
+          const handlerTimeout = options?.requestTimeout;
+          handlerTimeouts.push(handlerTimeout);
+          activeRequests += 1;
+          if (!handlerTimeout) {
+            return new Promise<never>(() => undefined);
+          }
+          return new Promise<never>((_resolve, reject) => {
+            setTimeout(() => {
+              activeRequests -= 1;
+              reject(new Error("custom handler request timed out"));
+            }, Math.max(1, handlerTimeout - 5));
+          });
+        },
+        updateHttpClientConfig: () => undefined,
+        httpHandlerConfigs: () => ({}),
+        destroy: () => undefined,
+      },
+    );
+    const client = new AlternatorDynamoDBClient({
+      seeds: ["seed"],
+      requestHandler: handler,
+      discovery: { background: false, timeoutMs },
+    });
+
+    try {
+      await client.alternator.refreshNodes();
+      expect(handlerTimeouts).toEqual([timeoutMs]);
+      expect(activeRequests).toBe(0);
+    } finally {
+      client.destroy();
+    }
+  });
+
+  it("unreferences standalone discovery probe deadlines when destroyed", async () => {
+    const timeoutMs = 31_339;
+    let requestStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      requestStarted = resolve;
+    });
+    const response = new Promise<never>(() => undefined);
+    let requestSignal: { readonly aborted: boolean } | undefined;
+    const handler = new RecordingHandler((_request, options) => {
+      requestSignal = options?.abortSignal;
+      requestStarted();
+      return response;
+    });
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    const client = new AlternatorDynamoDBClient({
+      seeds: ["seed"],
+      requestHandler: handler,
+      discovery: { background: false, timeoutMs },
+    });
+    const supportCheck = client.alternator.supportsScopedDiscovery();
+
+    try {
+      await started;
+      const deadline = setTimeoutSpy.mock.results.find(
+        (_result, index) => setTimeoutSpy.mock.calls[index]?.[1] === timeoutMs,
+      )?.value as ReturnType<typeof setTimeout> | undefined;
+      expect(deadline?.hasRef?.()).toBe(true);
+
+      client.destroy();
+      expect(deadline?.hasRef?.()).toBe(false);
+      expect(requestSignal?.aborted).toBe(true);
+
+      await expect(supportCheck).resolves.toBe(false);
+      expect(handler.requests).toHaveLength(1);
+    } finally {
+      client.destroy();
+      setTimeoutSpy.mockRestore();
+    }
+  });
+
   it("merges HTTP handler options without dropping bounded connection settings", async () => {
     let activeRequests = 0;
     let peakRequests = 0;
@@ -901,6 +1027,7 @@ describe("Alternator discovery", () => {
       });
 
       await client.alternator.refreshNodes();
+      expect(handle.mock.calls[0]?.[1]?.requestTimeout).toBe(0);
       await expect(client.send(new ListTablesCommand({}))).resolves.toMatchObject({
         TableNames: ["decoded"],
       });

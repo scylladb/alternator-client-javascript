@@ -33,6 +33,7 @@ import {
   createAlternatorRequestMiddleware,
 } from "./middleware.js";
 import type { AlternatorBodyCompressor } from "./compression-types.js";
+import type { ConfiguredRequestHandler } from "./runtime-common.js";
 import type { AlternatorDynamoDBClientConfig, AlternatorNode, NormalizedAlternatorConfig } from "./types.js";
 
 export interface AlternatorDynamoDBClientApi {
@@ -48,7 +49,7 @@ export interface AlternatorRuntimePlatform {
   createRequestHandler(
     input: AlternatorDynamoDBClientConfig,
     config: NormalizedAlternatorConfig,
-  ): HttpHandlerUserInput;
+  ): ConfiguredRequestHandler;
   compressBody: AlternatorBodyCompressor;
 }
 
@@ -62,7 +63,10 @@ export abstract class AlternatorDynamoDBClientBase extends DynamoDBClient {
     const alternatorConfig = normalizeConfig(config);
     platform.assertRuntimeSupport(alternatorConfig);
 
-    const requestHandler = platform.createRequestHandler(config, alternatorConfig);
+    const {
+      requestHandler,
+      forwardDiscoveryRequestTimeout,
+    } = platform.createRequestHandler(config, alternatorConfig);
     const dynamoConfig = buildDynamoConfig(config, alternatorConfig, requestHandler);
 
     super(dynamoConfig);
@@ -71,6 +75,7 @@ export abstract class AlternatorDynamoDBClientBase extends DynamoDBClient {
     this.discovery = new AlternatorDiscovery(
       alternatorConfig,
       this.config.requestHandler as HttpHandler,
+      forwardDiscoveryRequestTimeout,
     );
     this.keyAffinity = new KeyRouteAffinityPlanner(
       alternatorConfig.keyRouteAffinity,

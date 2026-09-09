@@ -39,15 +39,26 @@ interface InFlightRefresh {
   readonly deadlines: DiscoveryDeadlineContext;
 }
 
+interface ActiveDiscoveryRequest {
+  readonly abortController: AbortController;
+  readonly cancellation: Promise<never>;
+  readonly cancel: () => void;
+  responseBody: unknown;
+}
+
 export class AlternatorDiscovery {
   private liveHosts: string[];
   private refreshTimer: ReturnType<typeof setInterval> | undefined;
   private lastRefreshAttempt = 0;
   private inFlightRefresh: InFlightRefresh | undefined;
+  private readonly activeDeadlines = new Set<ReturnType<typeof setTimeout>>();
+  private readonly activeRequests = new Set<ActiveDiscoveryRequest>();
+  private destroyed = false;
 
   constructor(
     private readonly config: NormalizedAlternatorConfig,
     private readonly requestHandler: DiscoveryRequestHandler,
+    private readonly forwardRequestTimeoutToHandler: boolean,
   ) {
     this.liveHosts = [...config.seeds];
     if (config.runtime === "node" && config.discovery.background && config.discovery.refreshIntervalMs > 0) {
@@ -72,7 +83,7 @@ export class AlternatorDiscovery {
 
   private async startRefresh(referenced: boolean): Promise<AlternatorNode[]> {
     if (this.inFlightRefresh) {
-      if (referenced) {
+      if (referenced && !this.destroyed) {
         referenceDiscoveryDeadlines(this.inFlightRefresh.deadlines);
       }
       return this.inFlightRefresh.promise;
@@ -164,9 +175,18 @@ export class AlternatorDiscovery {
   }
 
   destroy(): void {
+    this.destroyed = true;
     if (this.refreshTimer) {
       clearInterval(this.refreshTimer);
       this.refreshTimer = undefined;
+    }
+    for (const deadline of this.activeDeadlines) {
+      deadline.unref?.();
+    }
+    for (const request of this.activeRequests) {
+      request.abortController.abort();
+      destroyResponseBody(request.responseBody);
+      request.cancel();
     }
   }
 
@@ -280,6 +300,10 @@ export class AlternatorDiscovery {
     query: LocalNodesQuery,
     deadlines?: DiscoveryDeadlineContext,
   ): Promise<string[]> {
+    if (this.destroyed) {
+      throw new Error("Alternator discovery has been destroyed");
+    }
+
     const request = new HttpRequest({
       protocol: `${this.config.scheme}:`,
       method: "GET",
@@ -293,13 +317,31 @@ export class AlternatorDiscovery {
     });
     const timeoutMs = this.config.discovery.timeoutMs;
     const abortController = new AbortController();
+    let rejectCancellation!: (error: Error) => void;
+    const cancellation = new Promise<never>((_resolve, reject) => {
+      rejectCancellation = reject;
+    });
+    const activeRequest: ActiveDiscoveryRequest = {
+      abortController,
+      cancellation,
+      cancel: () => rejectCancellation(new Error("Alternator discovery has been destroyed")),
+      responseBody: undefined,
+    };
+    this.activeRequests.add(activeRequest);
     let responseBody: unknown;
     const fetchNodes = async (): Promise<string[]> => {
       const response = await this.requestHandler.handle(request, {
-        requestTimeout: timeoutMs,
+        // Built-in handlers use the deadline below so it can be released during
+        // destroy. Custom handlers also receive it for transport-level cleanup.
+        requestTimeout: this.forwardRequestTimeoutToHandler ? timeoutMs : 0,
         abortSignal: abortController.signal,
       });
       responseBody = response.response.body;
+      activeRequest.responseBody = responseBody;
+      if (this.destroyed) {
+        destroyResponseBody(responseBody);
+        throw new Error("Alternator discovery has been destroyed");
+      }
 
       if (response.response.statusCode < 200 || response.response.statusCode >= 300) {
         await drainResponseBody(responseBody, timeoutMs);
@@ -315,7 +357,11 @@ export class AlternatorDiscovery {
     };
 
     if (timeoutMs <= 0) {
-      return fetchNodes();
+      try {
+        return await Promise.race([fetchNodes(), cancellation]);
+      } finally {
+        this.activeRequests.delete(activeRequest);
+      }
     }
 
     let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -325,16 +371,19 @@ export class AlternatorDiscovery {
         destroyResponseBody(responseBody);
         reject(new Error(`/localnodes request timed out after ${timeoutMs} ms`));
       }, timeoutMs);
+      this.activeDeadlines.add(timeout);
       deadlines?.timers.add(timeout);
-      if (deadlines && !deadlines.referenced) {
+      if (this.destroyed || (deadlines && !deadlines.referenced)) {
         timeout.unref?.();
       }
     });
 
     try {
-      return await Promise.race([fetchNodes(), timeoutPromise]);
+      return await Promise.race([fetchNodes(), timeoutPromise, cancellation]);
     } finally {
+      this.activeRequests.delete(activeRequest);
       if (timeout) {
+        this.activeDeadlines.delete(timeout);
         deadlines?.timers.delete(timeout);
         clearTimeout(timeout);
       }
