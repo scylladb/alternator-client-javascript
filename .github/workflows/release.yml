@@ -1,19 +1,13 @@
 name: Release package
 
 on:
-  release:
-    types:
-      - published
   workflow_dispatch:
-    inputs:
-      publish:
-        description: "Publish to npm instead of only validating the release process"
-        type: boolean
-        default: false
+  push:
+    tags:
+      - "v*"
 
 permissions:
   contents: read
-  id-token: write
 
 concurrency:
   group: release-${{ github.ref }}
@@ -21,22 +15,69 @@ concurrency:
 
 env:
   IS_CICD: 1
+  NPM_VERSION: 11.19.1
+  NPM_REGISTRY: https://registry.npmjs.org
 
 jobs:
-  publish:
-    name: Publish
+  preflight:
+    name: Validate release candidate
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 22
-          registry-url: "https://registry.npmjs.org"
-          cache: npm
+          node-version: 24
+
+      - name: Validate release metadata
+        id: package
+        shell: bash
+        run: |
+          package_name=$(node -p "require('./package.json').name")
+          package_version=$(node -p "require('./package.json').version")
+
+          if [[ "$package_name" != "@scylladb/alternator-client" ]]; then
+            echo "Unexpected package name: $package_name"
+            exit 1
+          fi
+
+          if [[ ! "$package_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid release version: $package_version"
+            exit 1
+          fi
+
+          release_tag="v${package_version}"
+          release_notes="release-notes/${release_tag}.md"
+          if [[ ! -s "$release_notes" ]]; then
+            echo "Missing or empty release notes: $release_notes"
+            exit 1
+          fi
+
+          if [[ "$package_version" == *-* ]]; then
+            dist_tag=next
+          else
+            dist_tag=latest
+          fi
+
+          git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main"
+          if ! git merge-base --is-ancestor HEAD refs/remotes/origin/main; then
+            echo "Selected commit is not contained in origin/main."
+            exit 1
+          fi
+
+          echo "name=$package_name" >> "$GITHUB_OUTPUT"
+          echo "version=$package_version" >> "$GITHUB_OUTPUT"
+          echo "tag=$release_tag" >> "$GITHUB_OUTPUT"
+          echo "dist_tag=$dist_tag" >> "$GITHUB_OUTPUT"
+
+      - name: Set up npm
+        run: npm install --global "npm@${NPM_VERSION}"
 
       - name: Install dependencies
         run: npm ci
@@ -44,12 +85,59 @@ jobs:
       - name: Verify package
         run: npm run verify
 
+      - name: Pack release candidate
+        id: pack
+        shell: bash
+        run: |
+          artifact_dir="${RUNNER_TEMP}/alternator-client-preflight-package"
+          mkdir -p "$artifact_dir"
+          rm -rf dist
+          npm pack --silent --pack-destination "$artifact_dir"
+
+          ARTIFACT_DIR="$artifact_dir" node --input-type=module <<'JS'
+          import { createHash } from "node:crypto";
+          import { appendFileSync, readFileSync, readdirSync } from "node:fs";
+          import { basename, dirname, resolve } from "node:path";
+
+          const artifactDirectory = resolve(process.env.ARTIFACT_DIR);
+          const filenames = readdirSync(artifactDirectory).filter((name) => name.endsWith(".tgz"));
+          if (filenames.length !== 1) {
+            throw new Error("npm pack did not return exactly one artifact");
+          }
+
+          const [filename] = filenames;
+          if (basename(filename) !== filename) {
+            throw new Error("npm pack returned an unsafe artifact filename");
+          }
+
+          const artifact = resolve(artifactDirectory, filename);
+          if (dirname(artifact) !== artifactDirectory) {
+            throw new Error("npm pack artifact was not created in expected directory");
+          }
+          const integrity = `sha512-${createHash("sha512").update(readFileSync(artifact)).digest("base64")}`;
+
+          appendFileSync(process.env.GITHUB_OUTPUT, `artifact=${artifact}\nintegrity=${integrity}\n`);
+          JS
+
+      - name: Test exact release candidate
+        run: npm run test:package -- "${{ steps.pack.outputs.artifact }}"
+
+      - name: Check registry release policy
+        id: registry
+        shell: bash
+        env:
+          DIST_TAG: ${{ steps.package.outputs.dist_tag }}
+          LOCAL_INTEGRITY: ${{ steps.pack.outputs.integrity }}
+          PACKAGE_NAME: ${{ steps.package.outputs.name }}
+          PACKAGE_VERSION: ${{ steps.package.outputs.version }}
+        run: bash .github/scripts/check-registry-state.sh
+
       - name: Cache Docker image
         id: docker-cache
-        uses: actions/cache@v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .docker-cache
-          key: scylla-docker-${{ hashFiles('test/docker-compose.yml') }}
+          key: scylla-docker-${{ hashFiles('test/docker-compose.yml', 'Makefile') }}
 
       - name: Save Docker image to cache
         if: steps.docker-cache.outputs.cache-hit != 'true'
@@ -57,7 +145,7 @@ jobs:
 
       - name: Cache certificates
         id: cert-cache
-        uses: actions/cache@v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .cert-cache
           key: scylla-certs-${{ hashFiles('Makefile') }}
@@ -69,103 +157,272 @@ jobs:
       - name: Run integration tests
         run: make test-all
 
-      - name: Audit production dependencies
-        run: npm audit --omit=dev --audit-level=moderate
-
-      - name: Check release tag matches package version
-        if: github.event_name == 'release'
-        run: |
-          version=$(node -p "require('./package.json').version")
-          tag="${GITHUB_REF_NAME#v}"
-
-          if [ "$version" != "$tag" ]; then
-            echo "package.json version $version does not match release tag $GITHUB_REF_NAME"
-            exit 1
-          fi
-
-      - name: Block manual publish outside main
-        if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref != 'refs/heads/main'
-        run: |
-          echo "Manual npm publish is only allowed from the main branch."
-          exit 1
-
-      - name: Dry-run publish
-        run: npm publish --dry-run --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Publish
-        if: github.event_name == 'release' || inputs.publish
-        run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-  verify-published-package:
-    name: Verify published package
-    if: github.event_name == 'release' || inputs.publish
-    needs: publish
+  publish:
+    name: Publish npm package
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    concurrency:
+      group: npm-publish-${{ github.repository }}
+      cancel-in-progress: false
+      queue: max
+    permissions:
+      contents: write
+      id-token: write
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 22
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
 
-      - name: Read package version
+      - name: Validate release tag and metadata
         id: package
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          version=$(node -p "require('./package.json').version")
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+          package_name=$(node -p "require('./package.json').name")
+          package_version=$(node -p "require('./package.json').version")
 
-      - name: Install published package
+          if [[ "$package_name" != "@scylladb/alternator-client" ]]; then
+            echo "Unexpected package name: $package_name"
+            exit 1
+          fi
+
+          if [[ ! "$package_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid release version: $package_version"
+            exit 1
+          fi
+
+          expected_tag="v${package_version}"
+          if [[ "$GITHUB_REF_NAME" != "$expected_tag" ]]; then
+            echo "Tag $GITHUB_REF_NAME does not match package version $package_version."
+            exit 1
+          fi
+
+          release_notes="release-notes/${expected_tag}.md"
+          if [[ ! -s "$release_notes" ]]; then
+            echo "Missing or empty release notes: $release_notes"
+            exit 1
+          fi
+
+          git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main"
+          tagged_commit=$(git rev-parse "${GITHUB_REF}^{commit}")
+          if ! git merge-base --is-ancestor "$tagged_commit" refs/remotes/origin/main; then
+            echo "Tagged commit $tagged_commit is not contained in origin/main."
+            exit 1
+          fi
+
+          tag_object=$(git rev-parse "$GITHUB_REF")
+          if [[ "$(git cat-file -t "$tag_object")" != "tag" ]]; then
+            echo "Release tag $GITHUB_REF_NAME must be an annotated tag."
+            exit 1
+          fi
+
+          tag_verified=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_object}" --jq '.verification.verified')
+          if [[ "$tag_verified" != "true" ]]; then
+            echo "Release tag $GITHUB_REF_NAME must have a signature verified by GitHub."
+            exit 1
+          fi
+
+          if [[ "$package_version" == *-* ]]; then
+            dist_tag=next
+          else
+            dist_tag=latest
+          fi
+
+          echo "name=$package_name" >> "$GITHUB_OUTPUT"
+          echo "version=$package_version" >> "$GITHUB_OUTPUT"
+          echo "tag=$expected_tag" >> "$GITHUB_OUTPUT"
+          echo "notes=$release_notes" >> "$GITHUB_OUTPUT"
+          echo "dist_tag=$dist_tag" >> "$GITHUB_OUTPUT"
+
+      - name: Set up npm
+        run: npm install --global "npm@${NPM_VERSION}"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check types
+        run: npm run typecheck
+
+      - name: Lint source
+        run: npm run lint
+
+      - name: Run unit tests
+        run: npm test
+
+      - name: Test release policy
+        run: npm run test:release-policy
+
+      - name: Build package
+        run: npm run build
+
+      - name: Lint package metadata and types
+        run: npm run lint:package
+
+      - name: Audit all dependencies
+        run: npm run audit:dependencies
+
+      - name: Cache Docker image
+        id: docker-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .docker-cache
+          key: scylla-docker-${{ hashFiles('test/docker-compose.yml', 'Makefile') }}
+
+      - name: Save Docker image to cache
+        if: steps.docker-cache.outputs.cache-hit != 'true'
+        run: make docker-cache-save
+
+      - name: Cache certificates
+        id: cert-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .cert-cache
+          key: scylla-certs-${{ hashFiles('Makefile') }}
+
+      - name: Save certificates to cache
+        if: steps.cert-cache.outputs.cache-hit != 'true'
+        run: make cert-cache-save
+
+      - name: Run integration tests
+        run: make test-all
+
+      - name: Pack release artifact
+        id: pack
+        shell: bash
         run: |
-          mkdir -p /tmp/alternator-client-publish-check
-          cd /tmp/alternator-client-publish-check
-          npm init -y
+          artifact_dir="${RUNNER_TEMP}/alternator-client-package"
+          mkdir -p "$artifact_dir"
+          rm -rf dist
+          npm pack --silent --pack-destination "$artifact_dir"
 
-          for attempt in 1 2 3 4 5; do
-            if npm install "@scylladb/alternator-client@${PACKAGE_VERSION}"; then
-              exit 0
+          ARTIFACT_DIR="$artifact_dir" node --input-type=module <<'JS'
+          import { createHash } from "node:crypto";
+          import { appendFileSync, readFileSync, readdirSync } from "node:fs";
+          import { basename, dirname, resolve } from "node:path";
+
+          const artifactDirectory = resolve(process.env.ARTIFACT_DIR);
+          const filenames = readdirSync(artifactDirectory).filter((name) => name.endsWith(".tgz"));
+          if (filenames.length !== 1) {
+            throw new Error("npm pack did not return exactly one artifact");
+          }
+
+          const [filename] = filenames;
+          if (basename(filename) !== filename) {
+            throw new Error("npm pack returned an unsafe artifact filename");
+          }
+
+          const artifact = resolve(artifactDirectory, filename);
+          if (dirname(artifact) !== artifactDirectory) {
+            throw new Error("npm pack artifact was not created in expected directory");
+          }
+          const integrity = `sha512-${createHash("sha512").update(readFileSync(artifact)).digest("base64")}`;
+
+          appendFileSync(process.env.GITHUB_OUTPUT, `artifact=${artifact}\nintegrity=${integrity}\n`);
+          JS
+
+      - name: Test exact release artifact
+        run: npm run test:package -- "${{ steps.pack.outputs.artifact }}"
+
+      - name: Check registry release policy
+        id: registry
+        shell: bash
+        env:
+          DIST_TAG: ${{ steps.package.outputs.dist_tag }}
+          LOCAL_INTEGRITY: ${{ steps.pack.outputs.integrity }}
+          PACKAGE_NAME: ${{ steps.package.outputs.name }}
+          PACKAGE_VERSION: ${{ steps.package.outputs.version }}
+        run: bash .github/scripts/check-registry-state.sh
+
+      - name: Publish exact release artifact
+        if: steps.registry.outputs.publish_needed == 'true'
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [[ -z "${NODE_AUTH_TOKEN:-}" ]]; then
+            unset NODE_AUTH_TOKEN
+          fi
+          npm publish "${{ steps.pack.outputs.artifact }}" \
+            --access public \
+            --tag "${{ steps.package.outputs.dist_tag }}" \
+            --provenance
+
+      - name: Wait for registry and verify integrity
+        shell: bash
+        env:
+          DIST_TAG: ${{ steps.package.outputs.dist_tag }}
+          LOCAL_INTEGRITY: ${{ steps.pack.outputs.integrity }}
+          PACKAGE_NAME: ${{ steps.package.outputs.name }}
+          PACKAGE_VERSION: ${{ steps.package.outputs.version }}
+          PUBLISH_NEEDED: ${{ steps.registry.outputs.publish_needed }}
+        run: |
+          for attempt in $(seq 1 12); do
+            remote_integrity=$(npm view "${PACKAGE_NAME}@${PACKAGE_VERSION}" dist.integrity \
+              --registry "$NPM_REGISTRY" 2>/dev/null || true)
+
+            if [[ "$remote_integrity" == "$LOCAL_INTEGRITY" ]]; then
+              if [[ "$PUBLISH_NEEDED" != "true" ]]; then
+                echo "Registry serves expected artifact; existing dist-tags were left unchanged."
+                exit 0
+              fi
+
+              remote_tag=$(npm view "$PACKAGE_NAME" "dist-tags.${DIST_TAG}" \
+                --registry "$NPM_REGISTRY" 2>/dev/null || true)
+              if [[ "$remote_tag" == "$PACKAGE_VERSION" ]]; then
+                echo "Registry serves expected artifact and dist-tag."
+                exit 0
+              fi
             fi
 
-            echo "Attempt $attempt failed, retrying in 15s."
-            sleep 15
+            if [[ -n "$remote_integrity" && "$remote_integrity" != "$LOCAL_INTEGRITY" ]]; then
+              echo "Registry integrity mismatch for ${PACKAGE_NAME}@${PACKAGE_VERSION}."
+              exit 1
+            fi
+
+            echo "Registry not ready (attempt $attempt/12); retrying in 10 seconds."
+            sleep 10
           done
 
-          echo "Could not install @scylladb/alternator-client@${PACKAGE_VERSION} from npm."
+          echo "Registry did not serve expected artifact state in time."
           exit 1
+
+      - name: Test package from npm registry
+        run: npm run test:package -- "${{ steps.package.outputs.name }}@${{ steps.package.outputs.version }}"
+
+      - name: Create or reconcile GitHub release
+        shell: bash
         env:
+          GH_TOKEN: ${{ github.token }}
           PACKAGE_VERSION: ${{ steps.package.outputs.version }}
-
-      - name: Verify package exports
-        working-directory: /tmp/alternator-client-publish-check
+          RELEASE_NOTES: ${{ steps.package.outputs.notes }}
+          RELEASE_TAG: ${{ steps.package.outputs.tag }}
         run: |
-          node --input-type=module <<'JS'
-          const main = await import("@scylladb/alternator-client");
-          const document = await import("@scylladb/alternator-client/document");
+          args=(
+            "$RELEASE_TAG"
+            --verify-tag
+            --title "$RELEASE_TAG"
+            --notes-file "$RELEASE_NOTES"
+          )
+          if [[ "$PACKAGE_VERSION" == *-* ]]; then
+            args+=(--prerelease)
+          fi
 
-          if (typeof main.AlternatorDynamoDBClient !== "function") {
-            throw new Error("missing ESM AlternatorDynamoDBClient export");
-          }
-
-          if (typeof document.AlternatorDynamoDBDocumentClient !== "function") {
-            throw new Error("missing ESM AlternatorDynamoDBDocumentClient export");
-          }
-          JS
-
-          node <<'JS'
-          const main = require("@scylladb/alternator-client");
-          const document = require("@scylladb/alternator-client/document");
-
-          if (typeof main.AlternatorDynamoDBClient !== "function") {
-            throw new Error("missing CJS AlternatorDynamoDBClient export");
-          }
-
-          if (typeof document.AlternatorDynamoDBDocumentClient !== "function") {
-            throw new Error("missing CJS AlternatorDynamoDBDocumentClient export");
-          }
-          JS
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            args+=(--draft=false)
+            if [[ "$PACKAGE_VERSION" != *-* ]]; then
+              args+=(--prerelease=false)
+            fi
+            gh release edit "${args[@]}"
+          else
+            gh release create "${args[@]}"
+          fi

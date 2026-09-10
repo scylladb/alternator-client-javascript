@@ -1,56 +1,114 @@
 {
   "name": "@scylladb/alternator-client",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "AWS SDK v3-compatible DynamoDB client with ScyllaDB Alternator cluster discovery and routing.",
   "license": "Apache-2.0",
+  "author": "ScyllaDB",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/scylladb/alternator-client-javascript.git"
+  },
+  "homepage": "https://github.com/scylladb/alternator-client-javascript#readme",
+  "bugs": {
+    "url": "https://github.com/scylladb/alternator-client-javascript/issues"
+  },
+  "keywords": [
+    "scylladb",
+    "alternator",
+    "dynamodb",
+    "aws-sdk",
+    "database"
+  ],
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "browser": "./dist/edge.js",
   "types": "./dist/index.d.ts",
+  "typesVersions": {
+    "*": {
+      "document": [
+        "./dist/document.d.ts"
+      ],
+      "edge": [
+        "./dist/edge.d.ts"
+      ],
+      "document/edge": [
+        "./dist/document-edge.d.ts"
+      ]
+    }
+  },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
+  },
+  "packageManager": "npm@11.19.1",
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
   },
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
       "browser": {
-        "import": "./dist/edge.js"
+        "types": "./dist/edge.d.ts",
+        "import": "./dist/edge.js",
+        "default": "./dist/edge.js"
       },
       "worker": {
-        "import": "./dist/edge.js"
+        "types": "./dist/edge.d.ts",
+        "import": "./dist/edge.js",
+        "default": "./dist/edge.js"
       },
       "node": {
-        "import": "./dist/index.js",
-        "require": "./dist/index.cjs"
+        "import": {
+          "types": "./dist/index.d.ts",
+          "default": "./dist/index.js"
+        },
+        "require": {
+          "types": "./dist/index.d.cts",
+          "default": "./dist/index.cjs"
+        }
       },
       "default": {
-        "import": "./dist/edge.js"
+        "types": "./dist/edge.d.ts",
+        "default": "./dist/edge.js"
       }
     },
     "./edge": {
-      "types": "./dist/edge.d.ts",
-      "import": "./dist/edge.js"
+      "import": {
+        "types": "./dist/edge.d.ts",
+        "default": "./dist/edge.js"
+      }
     },
     "./document": {
-      "types": "./dist/document.d.ts",
       "browser": {
-        "import": "./dist/document-edge.js"
+        "types": "./dist/document-edge.d.ts",
+        "import": "./dist/document-edge.js",
+        "default": "./dist/document-edge.js"
       },
       "worker": {
-        "import": "./dist/document-edge.js"
+        "types": "./dist/document-edge.d.ts",
+        "import": "./dist/document-edge.js",
+        "default": "./dist/document-edge.js"
       },
       "node": {
-        "import": "./dist/document.js",
-        "require": "./dist/document.cjs"
+        "import": {
+          "types": "./dist/document.d.ts",
+          "default": "./dist/document.js"
+        },
+        "require": {
+          "types": "./dist/document.d.cts",
+          "default": "./dist/document.cjs"
+        }
       },
       "default": {
-        "import": "./dist/document-edge.js"
+        "types": "./dist/document-edge.d.ts",
+        "default": "./dist/document-edge.js"
       }
     },
     "./document/edge": {
-      "types": "./dist/document-edge.d.ts",
-      "import": "./dist/document-edge.js"
+      "import": {
+        "types": "./dist/document-edge.d.ts",
+        "default": "./dist/document-edge.js"
+      }
     },
     "./package.json": "./package.json"
   },
@@ -62,38 +120,53 @@
   "sideEffects": false,
   "scripts": {
     "build": "tsup",
+    "prepack": "npm run build",
     "lint": "eslint . --max-warnings=0",
+    "lint:package": "publint --strict && attw --pack . --entrypoints . ./document && attw --pack . --profile esm-only --entrypoints ./edge ./document/edge",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:release-policy": "node --test scripts/check-dist-tag.test.mjs",
+    "test:package": "node scripts/test-package.mjs",
     "test:integration": "vitest run --config vitest.integration.config.ts",
-    "verify": "npm run typecheck && npm run lint && npm run test && npm run build"
+    "audit:dependencies": "npm audit --audit-level=moderate",
+    "verify": "npm run typecheck && npm run lint && npm run test && npm run test:release-policy && npm run build && npm run lint:package && npm run test:package && npm run audit:dependencies"
   },
   "dependencies": {
-    "@aws-sdk/client-dynamodb": "^3.1075.0",
-    "@smithy/fetch-http-handler": "^5.5.2",
-    "@smithy/node-http-handler": "^4.8.2",
-    "@smithy/protocol-http": "^5.5.2",
-    "@smithy/types": "^4.15.0"
+    "@aws-sdk/client-dynamodb": "^3.1128.0",
+    "@smithy/fetch-http-handler": "^5.8.0",
+    "@smithy/node-http-handler": "^4.12.1",
+    "@smithy/protocol-http": "^5.6.2",
+    "@smithy/types": "^4.18.0"
   },
   "devDependencies": {
-    "@aws-sdk/lib-dynamodb": "^3.1075.0",
+    "@arethetypeswrong/cli": "0.18.5",
+    "@aws-sdk/lib-dynamodb": "^3.1128.0",
     "@eslint/js": "^10.0.1",
-    "@types/node": "^24.0.0",
-    "eslint": "^10.5.0",
+    "@types/node": "^24.13.3",
+    "esbuild": "^0.28.2",
+    "eslint": "^10.10.0",
     "eslint-plugin-license-header": "0.9.0",
-    "globals": "^17.7.0",
+    "globals": "^17.12.0",
+    "publint": "0.3.24",
+    "semver": "^7.8.5",
+    "tar": "7.5.22",
     "tsup": "^8.5.1",
     "typescript": "^6.0.3",
-    "typescript-eslint": "^8.62.0",
-    "vitest": "^4.1.9"
+    "typescript-eslint": "^8.70.0",
+    "vitest": "^4.1.11"
   },
   "peerDependencies": {
-    "@aws-sdk/client-dynamodb": "^3.1075.0",
-    "@aws-sdk/lib-dynamodb": "^3.1075.0"
+    "@aws-sdk/client-dynamodb": "^3.1128.0",
+    "@aws-sdk/lib-dynamodb": "^3.1128.0"
   },
   "peerDependenciesMeta": {
     "@aws-sdk/lib-dynamodb": {
       "optional": true
     }
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true,
+    "esbuild@0.27.2": true,
+    "fsevents": false
   }
 }
