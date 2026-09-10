@@ -132,7 +132,7 @@
     "verify": "npm run typecheck && npm run lint && npm run test && npm run test:release-policy && npm run build && npm run lint:package && npm run test:package && npm run audit:dependencies"
   },
   "dependencies": {
-    "@aws-sdk/client-dynamodb": "^3.1128.0",
+    "@aws-sdk/client-dynamodb": "^3.1129.0",
     "@smithy/fetch-http-handler": "^5.8.0",
     "@smithy/node-http-handler": "^4.12.1",
     "@smithy/protocol-http": "^5.6.2",
@@ -140,7 +140,7 @@
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "0.18.5",
-    "@aws-sdk/lib-dynamodb": "^3.1128.0",
+    "@aws-sdk/lib-dynamodb": "^3.1129.0",
     "@eslint/js": "^10.0.1",
     "@types/node": "^24.13.3",
     "esbuild": "^0.28.2",
@@ -156,8 +156,8 @@
     "vitest": "^4.1.11"
   },
   "peerDependencies": {
-    "@aws-sdk/client-dynamodb": "^3.1128.0",
-    "@aws-sdk/lib-dynamodb": "^3.1128.0"
+    "@aws-sdk/client-dynamodb": "^3.1129.0",
+    "@aws-sdk/lib-dynamodb": "^3.1129.0"
   },
   "peerDependenciesMeta": {
     "@aws-sdk/lib-dynamodb": {
