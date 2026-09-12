@@ -42,6 +42,8 @@ const licenseHeader = [
 export default tseslint.config(
   {
     ignores: [
+      ".ccm-diagnostics/**",
+      "bin/**",
       "coverage/**",
       "dist/**",
       "node_modules/**",

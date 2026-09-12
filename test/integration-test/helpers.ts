@@ -51,7 +51,12 @@ export function buildClient(
 ): AlternatorDynamoDBClient {
   const tls = endpoint.scheme === "https"
     ? {
-        rejectUnauthorized: false,
+        ...(integrationConfig.caCertPath === undefined
+          ? { rejectUnauthorized: false }
+          : {
+              ca: { file: integrationConfig.caCertPath } as const,
+              rejectUnauthorized: true,
+            }),
         ...overrides.tls,
       }
     : overrides.tls;
@@ -89,7 +94,12 @@ export function buildDocumentClient(
       ...(endpoint.scheme === "https"
         ? {
             tls: {
-              rejectUnauthorized: false,
+              ...(integrationConfig.caCertPath === undefined
+                ? { rejectUnauthorized: false }
+                : {
+                    ca: { file: integrationConfig.caCertPath } as const,
+                    rejectUnauthorized: true,
+                  }),
               ...overrides.tls,
             },
           }
@@ -217,7 +227,15 @@ export async function assertListTablesSucceeds(client: DynamoDBClient): Promise<
 }
 
 export function uniqueTableName(prefix: string): string {
-  return `${prefix}_${randomUUID().replaceAll("-", "").slice(0, 12)}`;
+  const suffix = `_${randomUUID().replaceAll("-", "")}`;
+  const sanitized = [...prefix.toLowerCase()]
+    .map((character) => /[a-z0-9_.-]/u.test(character) ? character : "_")
+    .join("");
+  const maximumHintLength = Math.max(
+    0,
+    255 - integrationConfig.resourcePrefix.length - suffix.length,
+  );
+  return `${integrationConfig.resourcePrefix}${sanitized.slice(0, maximumHintLength)}${suffix}`;
 }
 
 export function largePayload(): string {

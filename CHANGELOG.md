@@ -4,6 +4,14 @@ Notable changes to `@scylladb/alternator-client` are recorded here.
 
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- Replaced Docker Compose integration-test provisioning with a repository-pinned
+  `scylla-ccm` harness using native Scylla relocatable packages, typed cluster
+  specifications, isolated resource scopes, and recoverable lifecycle cleanup.
+
 ## [1.0.0] - 2026-09-09
 
 Initial stable release.
@@ -25,4 +33,5 @@ Initial stable release.
 - DNS address fallback for configured discovery endpoints and IPv4/IPv6 seed and
   discovered-node support.
 
+[Unreleased]: https://github.com/scylladb/alternator-client-javascript/compare/v1.0.0...HEAD
 [1.0.0]: https://github.com/scylladb/alternator-client-javascript/releases/tag/v1.0.0

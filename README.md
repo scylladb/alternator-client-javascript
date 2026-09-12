@@ -35,7 +35,7 @@ For document commands in an Edge bundle, use:
 import { AlternatorDynamoDBDocumentClient } from "@scylladb/alternator-client/document/edge";
 ```
 
-The integration suite uses ScyllaDB 2025.1 as its compatibility baseline. This
+The integration suite uses ScyllaDB 2025.2.5 as its compatibility baseline. This
 records the version tested for this release; it is not a blanket compatibility
 guarantee for every ScyllaDB release.
 
@@ -417,25 +417,32 @@ npm run verify
 make test-all
 ```
 
-`npm test` runs the fast unit suite. Integration tests live under
-`test/integration-test` and are skipped unless `INTEGRATION_TESTS` is truthy:
+`npm test` runs the fast unit suite. Integration tests use
+[scylla-ccm](https://github.com/scylladb/scylla-ccm) and native Scylla
+relocatable packages. They require Linux, Python 3.9 or newer, OpenSSL, and
+Git, plus [`uv`](https://docs.astral.sh/uv/). Install the repository-pinned CCM
+revision and run the suite with:
 
 ```sh
-INTEGRATION_TESTS=true \
-ALTERNATOR_HOST=172.39.0.2 \
-ALTERNATOR_PORT=9998 \
-ALTERNATOR_HTTPS_PORT=9999 \
-ALTERNATOR_DATACENTER=datacenter1 \
-ALTERNATOR_RACK=rack1 \
-npm run test:integration
+make ccm-install
+make test-integration
 ```
 
-For custom CA HTTPS coverage, also set `ALTERNATOR_CA_CERT_PATH` to a PEM CA
-certificate path.
+`make test-all` is an alias for the CCM-backed integration suite. The harness
+owns provisioning, endpoint readiness, generated TLS material, per-lease table
+namespaces, diagnostics, and cleanup. The default specification uses three
+nodes in one datacenter and rack, HTTP and HTTPS, two processing units and
+1,024 MiB per node, disabled authentication and authorization, and Scylla
+`release:2025.2.5`.
 
-`make test-all` starts the same three-node ScyllaDB Docker cluster shape used by
-the Java client tests, waits for Alternator, runs `npm run test:integration`
-with the required environment variables, and stops the cluster.
+Set `SCYLLA_VERSION` to select another Scylla package or `SCYLLA_CCM_PATH` to
+use another CCM executable. `SCYLLA_CCM_MAX_NODES` may lower the nine-node
+ceiling. `SCYLLA_CCM_ROOT` selects the private harness state root; concurrent
+processes must use the same root to coordinate loopback address reservations.
+The root path must not contain whitespace because the pinned Scylla package
+cannot consume such an absolute configuration path.
+`SCYLLA_CCM_DIAGNOSTICS_DIR` selects the external diagnostics directory and
+defaults to `.ccm-diagnostics`.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow and
 [RELEASING.md](RELEASING.md) for the maintainer release procedure.

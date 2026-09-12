@@ -127,7 +127,10 @@
     "test": "vitest run",
     "test:release-policy": "node --test scripts/check-dist-tag.test.mjs",
     "test:package": "node scripts/test-package.mjs",
-    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "ccm:install": "node scripts/install-ccm.mjs",
+    "test:integration": "node scripts/run-integration.mjs",
+    "test:integration:provisioning": "vitest run --config vitest.integration.config.ts test/integration-test/cluster-provisioning.test.ts",
+    "test:integration:suite": "vitest run --config vitest.integration.config.ts --exclude test/integration-test/cluster-provisioning.test.ts",
     "audit:dependencies": "npm audit --audit-level=moderate",
     "verify": "npm run typecheck && npm run lint && npm run test && npm run test:release-policy && npm run build && npm run lint:package && npm run test:package && npm run audit:dependencies"
   },
@@ -153,7 +156,8 @@
     "tsup": "^8.5.1",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.70.0",
-    "vitest": "^4.1.11"
+    "vitest": "^4.1.11",
+    "yaml": "2.9.1"
   },
   "peerDependencies": {
     "@aws-sdk/client-dynamodb": "^3.1129.0",
