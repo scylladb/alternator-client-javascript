@@ -26,12 +26,13 @@ export interface IntegrationEndpoint {
 
 export const integrationConfig = {
   enabled: truthy(process.env.INTEGRATION_TESTS),
-  host: process.env.ALTERNATOR_HOST ?? "172.39.0.2",
-  httpPort: intEnv("ALTERNATOR_PORT", 9998),
-  httpsPort: intEnv("ALTERNATOR_HTTPS_PORT", 9999),
-  datacenter: process.env.ALTERNATOR_DATACENTER ?? "datacenter1",
-  rack: process.env.ALTERNATOR_RACK ?? "rack1",
-  caCertPath: process.env.ALTERNATOR_CA_CERT_PATH,
+  host: process.env.ALTERNATOR_HOST ?? "127.0.0.1",
+  httpPort: intEnv("ALTERNATOR_PORT", 8080),
+  httpsPort: intEnv("ALTERNATOR_HTTPS_PORT", 8043),
+  datacenter: process.env.ALTERNATOR_DATACENTER ?? "dc1",
+  rack: process.env.ALTERNATOR_RACK ?? "RAC1",
+  caCertPath: optionalNonemptyEnvironmentValue(process.env.ALTERNATOR_CA_CERT_PATH),
+  resourcePrefix: integrationResourcePrefix(process.env.ALTERNATOR_RESOURCE_PREFIX),
   credentials: {
     accessKeyId: process.env.ALTERNATOR_ACCESS_KEY_ID ?? "test",
     secretAccessKey: process.env.ALTERNATOR_SECRET_ACCESS_KEY ?? "test",
@@ -78,4 +79,22 @@ function intEnv(name: string, fallback: number): number {
     throw new Error(`${name} must be an integer port between 1 and 65535`);
   }
   return value;
+}
+
+export function optionalNonemptyEnvironmentValue(value: string | undefined): string | undefined {
+  return value === undefined || value.trim() === "" ? undefined : value;
+}
+
+export function integrationResourcePrefix(value: string | undefined): string {
+  const prefix = value ?? "js_it_external_";
+  const maximumLength = 255 - 33;
+  if (!/^[A-Za-z0-9_.-]*$/u.test(prefix)) {
+    throw new Error(
+      "ALTERNATOR_RESOURCE_PREFIX may contain only ASCII letters, digits, underscore, hyphen, and period",
+    );
+  }
+  if (prefix.length > maximumLength) {
+    throw new Error(`ALTERNATOR_RESOURCE_PREFIX cannot exceed ${maximumLength} characters`);
+  }
+  return prefix;
 }

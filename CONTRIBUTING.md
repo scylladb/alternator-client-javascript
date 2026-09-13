@@ -10,8 +10,8 @@ Do not report security vulnerabilities in a public issue. Follow
 ## Development setup
 
 Use Node.js 22.13 or later in the 22.x line, or Node.js 24 or newer, with npm
-11.19.1. Docker with the Compose plugin is required for the ScyllaDB integration
-suite.
+11.19.1. The ScyllaDB integration suite also requires Linux, Python 3.9 or
+newer, OpenSSL, Git, and [`uv`](https://docs.astral.sh/uv/).
 
 ```sh
 git clone https://github.com/scylladb/alternator-client-javascript.git
@@ -48,21 +48,34 @@ make test-all
 full dependency audit, and `test:package`. The package test builds a tarball,
 installs it in an isolated temporary project, and checks runtime exports and
 TypeScript declarations.
-`make test-all` starts the repository's three-node ScyllaDB 2025.1 Docker
-cluster, runs the integration suite, and stops the cluster.
+`make test-all` installs the repository-pinned `scylla-ccm`, provisions a
+native three-node Scylla cluster, runs the integration suite, and removes the
+cluster. The default cluster uses Scylla `release:2025.2.5`, one datacenter and
+rack, HTTP and HTTPS, two processing units and 1,024 MiB per node, and disabled
+authentication and authorization.
 
-When debugging against an existing cluster, run the integration tests directly:
+The CCM harness accepts these environment overrides:
 
-```sh
-INTEGRATION_TESTS=true \
-ALTERNATOR_HOST=172.39.0.2 \
-ALTERNATOR_PORT=9998 \
-ALTERNATOR_HTTPS_PORT=9999 \
-ALTERNATOR_DATACENTER=datacenter1 \
-ALTERNATOR_RACK=rack1 \
-ALTERNATOR_CA_CERT_PATH="$PWD/test/scylla/db.crt" \
-npm run test:integration
-```
+- `SCYLLA_VERSION` selects the relocatable Scylla package.
+- `SCYLLA_CCM_PATH` selects an existing CCM executable.
+- `SCYLLA_CCM_ROOT` selects the private state and address-reservation root.
+  Its path must not contain whitespace.
+- `SCYLLA_CCM_MAX_NODES` may lower the hard nine-node ceiling.
+- `SCYLLA_CCM_DIAGNOSTICS_DIR` selects the external diagnostics directory;
+  the repository default is `.ccm-diagnostics`.
+
+Processes running concurrently on one host must use the same
+`SCYLLA_CCM_ROOT` to coordinate loopback address reservations. After an
+uncatchable process termination, the next harness startup attempts recovery
+and preserves diagnostics or quarantined state when cleanup cannot finish
+safely.
+
+To run only existing client integration tests against an already running
+cluster, set `ALTERNATOR_USE_EXISTING=true` together with `INTEGRATION_TESTS`,
+`ALTERNATOR_HOST`, HTTP/HTTPS ports, topology labels, and optional CA path, then
+run `npm run test:integration:suite`. An optional `ALTERNATOR_RESOURCE_PREFIX`
+must contain at most 222 ASCII letters, digits, underscores, hyphens, or periods;
+an empty CA path is treated as absent.
 
 ## Making changes
 
@@ -73,7 +86,7 @@ npm run test:integration
 - Update the README for public configuration or behavior changes and add a
   changelog entry for user-visible changes.
 - Keep commits focused. Do not commit generated `dist` output, package tarballs,
-  local certificates, or Docker caches.
+  CCM state, diagnostics, local certificates, or relocatable packages.
 
 Open a pull request against `main` and describe the motivation, observable
 behavior, tests run, and compatibility impact. All required CI checks and review

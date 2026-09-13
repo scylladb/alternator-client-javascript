@@ -17,6 +17,8 @@ env:
   IS_CICD: 1
   NPM_VERSION: 11.19.1
   NPM_REGISTRY: https://registry.npmjs.org
+  SCYLLA_CCM_DIAGNOSTICS_DIR: .ccm-diagnostics
+  SCYLLA_VERSION: release:2025.2.5
 
 jobs:
   preflight:
@@ -34,6 +36,9 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@e92bafb6253dcd438e0484186d7669ea7a8ca1cc # v6.4.3
 
       - name: Validate release metadata
         id: package
@@ -130,32 +135,26 @@ jobs:
           LOCAL_INTEGRITY: ${{ steps.pack.outputs.integrity }}
           PACKAGE_NAME: ${{ steps.package.outputs.name }}
           PACKAGE_VERSION: ${{ steps.package.outputs.version }}
-        run: bash .github/scripts/check-registry-state.sh
+        run: node scripts/check-registry-state.mjs
 
-      - name: Cache Docker image
-        id: docker-cache
+      - name: Cache Scylla relocatable package
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: .docker-cache
-          key: scylla-docker-${{ hashFiles('test/docker-compose.yml', 'Makefile') }}
-
-      - name: Save Docker image to cache
-        if: steps.docker-cache.outputs.cache-hit != 'true'
-        run: make docker-cache-save
-
-      - name: Cache certificates
-        id: cert-cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: .cert-cache
-          key: scylla-certs-${{ hashFiles('Makefile') }}
-
-      - name: Save certificates to cache
-        if: steps.cert-cache.outputs.cache-hit != 'true'
-        run: make cert-cache-save
+          path: ~/.ccm/scylla-repository
+          key: scylla-ccm-relocatable-${{ runner.os }}-${{ runner.arch }}-release-2025.2.5
 
       - name: Run integration tests
+        timeout-minutes: 60
         run: make test-all
+
+      - name: Upload CCM diagnostics
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        if: always()
+        with:
+          name: ccm-diagnostics-release-preflight
+          path: .ccm-diagnostics/**
+          if-no-files-found: ignore
+          include-hidden-files: true
 
   publish:
     name: Publish npm package
@@ -181,6 +180,9 @@ jobs:
           node-version: 24
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@e92bafb6253dcd438e0484186d7669ea7a8ca1cc # v6.4.3
 
       - name: Validate release tag and metadata
         id: package
@@ -271,30 +273,24 @@ jobs:
       - name: Audit all dependencies
         run: npm run audit:dependencies
 
-      - name: Cache Docker image
-        id: docker-cache
+      - name: Cache Scylla relocatable package
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: .docker-cache
-          key: scylla-docker-${{ hashFiles('test/docker-compose.yml', 'Makefile') }}
-
-      - name: Save Docker image to cache
-        if: steps.docker-cache.outputs.cache-hit != 'true'
-        run: make docker-cache-save
-
-      - name: Cache certificates
-        id: cert-cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: .cert-cache
-          key: scylla-certs-${{ hashFiles('Makefile') }}
-
-      - name: Save certificates to cache
-        if: steps.cert-cache.outputs.cache-hit != 'true'
-        run: make cert-cache-save
+          path: ~/.ccm/scylla-repository
+          key: scylla-ccm-relocatable-${{ runner.os }}-${{ runner.arch }}-release-2025.2.5
 
       - name: Run integration tests
+        timeout-minutes: 60
         run: make test-all
+
+      - name: Upload CCM diagnostics
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        if: always()
+        with:
+          name: ccm-diagnostics-release-publish
+          path: .ccm-diagnostics/**
+          if-no-files-found: ignore
+          include-hidden-files: true
 
       - name: Pack release artifact
         id: pack
@@ -341,7 +337,7 @@ jobs:
           LOCAL_INTEGRITY: ${{ steps.pack.outputs.integrity }}
           PACKAGE_NAME: ${{ steps.package.outputs.name }}
           PACKAGE_VERSION: ${{ steps.package.outputs.version }}
-        run: bash .github/scripts/check-registry-state.sh
+        run: node scripts/check-registry-state.mjs
 
       - name: Publish exact release artifact
         if: steps.registry.outputs.publish_needed == 'true'

@@ -23,8 +23,15 @@ export default defineConfig({
   },
   test: {
     environment: "node",
+    fileParallelism: false,
+    globalSetup: ["test/integration-test/global-setup.ts"],
     include: ["test/integration-test/**/*.test.ts"],
-    testTimeout: 180_000,
-    hookTimeout: 60_000,
+    maxWorkers: 1,
+    // A failed node addition can consume the ten-minute command deadline, make one bounded
+    // ten-minute rollback attempt, and still need a final whole-cluster removal. Keep Vitest
+    // outside those lifecycle deadlines so it never abandons detached children or ownership.
+    testTimeout: 40 * 60_000,
+    hookTimeout: 15 * 60_000,
+    teardownTimeout: 15 * 60_000,
   },
 });
