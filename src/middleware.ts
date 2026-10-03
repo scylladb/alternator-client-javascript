@@ -107,7 +107,7 @@ export function createAlternatorRequestMiddleware<Input extends object, Output e
 
     await discovery.refreshIfDue();
 
-    const node = nextNodeForAttempt(
+    const node = await nextNodeForAttempt(
       invocationState(args.request, invocationTracker),
       context,
       args.input,
@@ -185,15 +185,15 @@ export function createAlternatorPostSigningMiddleware<Input extends object, Outp
   };
 }
 
-function nextNodeForAttempt<Input extends object>(
+async function nextNodeForAttempt<Input extends object>(
   state: AlternatorInvocationState,
   context: HandlerExecutionContext,
   input: Input,
   discovery: AlternatorDiscovery,
   keyAffinity: KeyRouteAffinityPlanner,
-): AlternatorNode | undefined {
+): Promise<AlternatorNode | undefined> {
   if (!state.queryPlan) {
-    state.queryPlan = createQueryPlan(context, input, discovery, keyAffinity);
+    state.queryPlan = await createQueryPlan(context, input, discovery, keyAffinity);
   }
 
   const node = state.queryPlan.next();
@@ -201,7 +201,7 @@ function nextNodeForAttempt<Input extends object>(
     return node;
   }
 
-  state.queryPlan = createQueryPlan(context, input, discovery, keyAffinity);
+  state.queryPlan = await createQueryPlan(context, input, discovery, keyAffinity);
   return state.queryPlan.next();
 }
 
@@ -238,14 +238,25 @@ function createInvocationState(): AlternatorInvocationState {
   };
 }
 
-function createQueryPlan<Input extends object>(
+async function createQueryPlan<Input extends object>(
   context: HandlerExecutionContext,
   input: Input,
   discovery: AlternatorDiscovery,
   keyAffinity: KeyRouteAffinityPlanner,
-): AlternatorQueryPlan {
-  const nodes = discovery.getKeyRouteAffinityNodes();
-  return keyAffinity.queryPlanForInput(input, nodes, context.commandName) ?? discovery.createQueryPlan();
+): Promise<AlternatorQueryPlan> {
+  const affinityPlan = keyAffinity.queryPlanForInput(
+    input,
+    discovery.getKeyRouteAffinityNodes(),
+    context.commandName,
+  );
+  if (!affinityPlan || !(await discovery.ensureKeyRouteAffinityReady())) {
+    return discovery.createQueryPlan();
+  }
+  return keyAffinity.queryPlanForInput(
+    input,
+    discovery.getKeyRouteAffinityNodes(),
+    context.commandName,
+  ) ?? discovery.createQueryPlan();
 }
 
 function whitelistHeaders(

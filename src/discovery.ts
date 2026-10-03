@@ -39,6 +39,16 @@ interface InFlightRefresh {
   readonly deadlines: DiscoveryDeadlineContext;
 }
 
+interface InFlightKeyRouteAffinityRefresh {
+  readonly promise: Promise<boolean>;
+  readonly deadlines: DiscoveryDeadlineContext;
+}
+
+interface ClusterDiscoveryResult {
+  readonly nodes: string[];
+  readonly complete: boolean;
+}
+
 interface ActiveDiscoveryRequest {
   readonly abortController: AbortController;
   readonly cancellation: Promise<never>;
@@ -49,9 +59,11 @@ interface ActiveDiscoveryRequest {
 export class AlternatorDiscovery {
   private liveHosts: string[];
   private keyRouteAffinityHosts: string[];
+  private keyRouteAffinityReady = false;
   private refreshTimer: ReturnType<typeof setInterval> | undefined;
   private lastRefreshAttempt = 0;
   private inFlightRefresh: InFlightRefresh | undefined;
+  private inFlightKeyRouteAffinityRefresh: InFlightKeyRouteAffinityRefresh | undefined;
   private readonly activeDeadlines = new Set<ReturnType<typeof setTimeout>>();
   private readonly activeRequests = new Set<ActiveDiscoveryRequest>();
   private destroyed = false;
@@ -77,6 +89,17 @@ export class AlternatorDiscovery {
 
   getKeyRouteAffinityNodes(): AlternatorNode[] {
     return this.keyRouteAffinityHosts.map((host) => this.toNode(host));
+  }
+
+  async ensureKeyRouteAffinityReady(): Promise<boolean> {
+    if (!this.config.keyRouteAffinity.enabled) {
+      return false;
+    }
+    if (this.keyRouteAffinityReady) {
+      return true;
+    }
+    await this.startRefresh(true);
+    return this.keyRouteAffinityReady;
   }
 
   createQueryPlan(preferredNode?: AlternatorNode): AlternatorQueryPlan {
@@ -204,8 +227,10 @@ export class AlternatorDiscovery {
     for (const scope of routingChain(this.config.routing)) {
       try {
         let nodes: string[];
+        let clusterDiscovery: ClusterDiscoveryResult | undefined;
         if (scope.kind === "cluster") {
-          nodes = await this.fetchClusterLocalNodes(deadlines);
+          clusterDiscovery = await this.fetchClusterLocalNodes(deadlines);
+          nodes = clusterDiscovery.nodes;
         } else {
           datacenterSupport ??= await this.probeRackDatacenterSupport("datacenter", deadlines);
           if (datacenterSupport === "unsupported") {
@@ -228,7 +253,9 @@ export class AlternatorDiscovery {
         if (nodes.length > 0) {
           this.liveHosts = normalizeDiscoveredHosts(nodes);
           if (scope.kind === "cluster") {
-            this.keyRouteAffinityHosts = this.liveHosts;
+            if (clusterDiscovery?.complete) {
+              this.publishKeyRouteAffinityHosts(clusterDiscovery.nodes);
+            }
           } else {
             await this.refreshKeyRouteAffinityHosts(deadlines);
           }
@@ -246,34 +273,70 @@ export class AlternatorDiscovery {
     return this.getLiveNodes();
   }
 
-  private async refreshKeyRouteAffinityHosts(deadlines: DiscoveryDeadlineContext): Promise<void> {
+  private refreshKeyRouteAffinityHosts(deadlines: DiscoveryDeadlineContext): Promise<boolean> {
     if (!this.config.keyRouteAffinity.enabled) {
-      return;
+      return Promise.resolve(false);
+    }
+    if (this.inFlightKeyRouteAffinityRefresh) {
+      if (deadlines.referenced) {
+        referenceDiscoveryDeadlines(this.inFlightKeyRouteAffinityRefresh.deadlines);
+      }
+      return this.inFlightKeyRouteAffinityRefresh.promise;
     }
 
-    const nodes = await this.fetchClusterLocalNodes(deadlines);
-    if (nodes.length > 0) {
-      this.keyRouteAffinityHosts = normalizeDiscoveredHosts(nodes);
+    const promise = this.refreshKeyRouteAffinityHostsOnce(deadlines).finally(() => {
+      this.inFlightKeyRouteAffinityRefresh = undefined;
+    });
+    this.inFlightKeyRouteAffinityRefresh = { promise, deadlines };
+    return promise;
+  }
+
+  private async refreshKeyRouteAffinityHostsOnce(
+    deadlines: DiscoveryDeadlineContext,
+  ): Promise<boolean> {
+    const discovery = await this.fetchClusterLocalNodes(
+      deadlines,
+      this.config.discovery.timeoutMs > 0 ? this.config.discovery.timeoutMs : 2_000,
+    );
+    if (discovery.complete) {
+      this.publishKeyRouteAffinityHosts(discovery.nodes);
     }
+    return this.keyRouteAffinityReady;
+  }
+
+  private publishKeyRouteAffinityHosts(hosts: readonly string[]): void {
+    const normalized = normalizeDiscoveredHosts(hosts);
+    if (normalized.length === 0) {
+      return;
+    }
+    this.keyRouteAffinityHosts = normalized;
+    this.keyRouteAffinityReady = true;
   }
 
   private candidateHosts(): string[] {
     return [...new Set([...this.liveHosts, ...this.config.seeds])];
   }
 
-  private async fetchClusterLocalNodes(deadlines: DiscoveryDeadlineContext): Promise<string[]> {
+  private async fetchClusterLocalNodes(
+    deadlines: DiscoveryDeadlineContext,
+    timeoutMs?: number,
+  ): Promise<ClusterDiscoveryResult> {
     const nodes: string[] = [];
     const query: LocalNodesQuery = {};
+    let complete = true;
 
     for (const host of this.config.seeds) {
       try {
-        const discovered = await this.fetchLocalNodes(host, query, deadlines);
-        if (discovered.length > 0) {
-          nodes.push(...discovered);
+        const discovered = await this.fetchLocalNodes(host, query, deadlines, timeoutMs);
+        const normalized = normalizeDiscoveredHosts(discovered);
+        if (normalized.length > 0) {
+          nodes.push(...normalized);
         } else {
+          complete = false;
           this.config.logger.debug?.("alternator discovery: localnodes returned no nodes", { host, query });
         }
       } catch (error) {
+        complete = false;
         this.config.logger.debug?.("alternator discovery: localnodes request failed", {
           host,
           query,
@@ -282,7 +345,10 @@ export class AlternatorDiscovery {
       }
     }
 
-    return normalizeDiscoveredHosts(nodes);
+    return {
+      nodes: normalizeDiscoveredHosts(nodes),
+      complete,
+    };
   }
 
   private async fetchFirstAvailableLocalNodes(
@@ -322,6 +388,7 @@ export class AlternatorDiscovery {
     host: string,
     query: LocalNodesQuery,
     deadlines?: DiscoveryDeadlineContext,
+    timeoutOverrideMs?: number,
   ): Promise<string[]> {
     if (this.destroyed) {
       throw new Error("Alternator discovery has been destroyed");
@@ -338,7 +405,7 @@ export class AlternatorDiscovery {
         host: hostHeader(host, this.config.port),
       },
     });
-    const timeoutMs = this.config.discovery.timeoutMs;
+    const timeoutMs = timeoutOverrideMs ?? this.config.discovery.timeoutMs;
     const abortController = new AbortController();
     let rejectCancellation!: (error: Error) => void;
     const cancellation = new Promise<never>((_resolve, reject) => {

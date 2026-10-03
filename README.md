@@ -389,7 +389,11 @@ partition key selects the same first node. When rack- or datacenter-aware
 routing is configured, affinity-qualified requests use a separately discovered
 cluster-wide node ring; requests that do not qualify for affinity remain in the
 configured routing scope. Include a seed from each datacenter that should be
-part of the affinity ring. In `any-write` mode,
+part of the affinity ring. Before the first affinity-qualified request is sent,
+the client waits for a complete cluster discovery pass across every configured
+seed. If that bounded pass is incomplete, the request uses the normal scoped
+query plan; partial refreshes never replace the last complete affinity ring. In
+`any-write` mode,
 `BatchWriteItem` uses voting: each usable write candidate votes for its seeded
 first node. Voted coordinators are tried by vote count descending, ties use
 canonical node-address order, and zero-vote live coordinators follow in
@@ -435,8 +439,8 @@ make test-integration
 `make test-all` is an alias for the CCM-backed integration suite. The harness
 owns provisioning, endpoint readiness, generated TLS material, per-lease table
 namespaces, diagnostics, and cleanup. The default specification uses three
-nodes in one datacenter and rack, HTTP and HTTPS, two processing units and
-1,024 MiB per node, disabled authentication and authorization, and Scylla
+nodes in one datacenter and three racks, HTTP and HTTPS, two processing units
+and 1,024 MiB per node, disabled authentication and authorization, and Scylla
 `release:2025.2.5`.
 
 Set `SCYLLA_VERSION` to select another Scylla package or `SCYLLA_CCM_PATH` to

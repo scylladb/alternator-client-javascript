@@ -16,7 +16,8 @@
 
 import { GetItemCommand, PutItemCommand } from "@aws-sdk/client-dynamodb";
 import { expect, it } from "vitest";
-import { describeIntegration, integrationEndpoints } from "./config.js";
+import { routing } from "../../src/index.js";
+import { describeIntegration, integrationConfig, integrationEndpoints } from "./config.js";
 import {
   buildClient,
   captureCommandRequests,
@@ -156,6 +157,112 @@ describeIntegration.each(integrationEndpoints())(
       } finally {
         await safeDeleteTable(client, tableName);
         client.destroy();
+      }
+    });
+
+    it.skipIf(
+      integrationConfig.secondRackHost === undefined || integrationConfig.secondRack === undefined,
+    )("lets affinity override rack routing while ordinary writes stay local", async () => {
+      const secondRackHost = integrationConfig.secondRackHost;
+      const secondRack = integrationConfig.secondRack;
+      if (secondRackHost === undefined || secondRack === undefined) {
+        throw new Error("multi-rack integration metadata is unavailable");
+      }
+
+      const tableName = uniqueTableName("js_affinity_rack_it");
+      const tableClient = buildClient(endpoint);
+      const firstRackClient = buildClient(
+        { ...endpoint, host: integrationConfig.host },
+        {
+          routing: routing.rack({
+            datacenter: integrationConfig.datacenter,
+            rack: integrationConfig.rack,
+          }),
+          keyRouteAffinity: {
+            mode: "read-before-write",
+            partitionKeys: { [tableName]: "user_id" },
+          },
+          maxAttempts: 1,
+        },
+      );
+      const secondRackClient = buildClient(
+        { ...endpoint, host: secondRackHost },
+        {
+          routing: routing.rack({
+            datacenter: integrationConfig.datacenter,
+            rack: secondRack,
+          }),
+          keyRouteAffinity: {
+            mode: "read-before-write",
+            partitionKeys: { [tableName]: "user_id" },
+          },
+          maxAttempts: 1,
+        },
+      );
+      const firstCaptured = captureCommandRequests(firstRackClient);
+      const secondCaptured = captureCommandRequests(secondRackClient);
+
+      try {
+        await safeDeleteTable(tableClient, tableName);
+        await createStringHashTable(tableClient, tableName, "user_id");
+        await tableClient.send(
+          new PutItemCommand({
+            TableName: tableName,
+            Item: { user_id: { S: "shared" }, writer: { S: "setup" } },
+          }),
+        );
+
+        for (const [client, writer] of [
+          [firstRackClient, "first"],
+          [secondRackClient, "second"],
+        ] as const) {
+          await client.send(
+            new PutItemCommand({
+              TableName: tableName,
+              Item: { user_id: { S: "shared" }, writer: { S: writer } },
+              ConditionExpression: "attribute_exists(user_id)",
+            }),
+          );
+        }
+
+        const firstAffinityHost = firstCaptured.find(
+          (entry) => entry.commandName === "PutItemCommand",
+        )?.request.hostname;
+        const secondAffinityHost = secondCaptured.find(
+          (entry) => entry.commandName === "PutItemCommand",
+        )?.request.hostname;
+        expect(firstAffinityHost).toBeDefined();
+        expect(secondAffinityHost).toBe(firstAffinityHost);
+
+        await expect(firstRackClient.alternator.refreshNodes()).resolves.toEqual([
+          expect.objectContaining({ host: integrationConfig.host }),
+        ]);
+        await expect(secondRackClient.alternator.refreshNodes()).resolves.toEqual([
+          expect.objectContaining({ host: secondRackHost }),
+        ]);
+        firstCaptured.length = 0;
+        secondCaptured.length = 0;
+
+        await firstRackClient.send(
+          new PutItemCommand({
+            TableName: tableName,
+            Item: { user_id: { S: "first-local" } },
+          }),
+        );
+        await secondRackClient.send(
+          new PutItemCommand({
+            TableName: tableName,
+            Item: { user_id: { S: "second-local" } },
+          }),
+        );
+
+        expect(firstCaptured[0]?.request.hostname).toBe(integrationConfig.host);
+        expect(secondCaptured[0]?.request.hostname).toBe(secondRackHost);
+      } finally {
+        await safeDeleteTable(tableClient, tableName);
+        firstRackClient.destroy();
+        secondRackClient.destroy();
+        tableClient.destroy();
       }
     });
 
