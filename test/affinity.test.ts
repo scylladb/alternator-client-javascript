@@ -15,7 +15,7 @@
  */
 
 import { BatchWriteItemCommand, PutItemCommand } from "@aws-sdk/client-dynamodb";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { hashAttributeValue, KeyRouteAffinityPlanner } from "../src/affinity.js";
 import { AlternatorDynamoDBClient, routing } from "../src/index.js";
 import { firstNodeWithSeed } from "../src/query-plan.js";
@@ -144,6 +144,60 @@ describe("key route affinity", () => {
     } finally {
       rackA.client.destroy();
       rackB.client.destroy();
+    }
+  });
+
+  it("bounds readiness while joining a zero-timeout hanging refresh", async () => {
+    vi.useFakeTimers();
+    let requestStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      requestStarted = resolve;
+    });
+    let discoverySignal: { readonly aborted: boolean } | undefined;
+    const handler = new RecordingHandler((request, options) => {
+      if (request.path === "/localnodes") {
+        discoverySignal = options?.abortSignal;
+        requestStarted();
+        return new Promise(() => undefined);
+      }
+      return {};
+    });
+    const client = new AlternatorDynamoDBClient({
+      seeds: ["rack-local-node"],
+      requestHandler: handler,
+      discovery: { background: false, timeoutMs: 0 },
+      routing: routing.rack({ datacenter: "dc1", rack: "rack-local" }),
+      keyRouteAffinity: {
+        mode: "read-before-write",
+        partitionKeys: { users: "id" },
+      },
+      maxAttempts: 1,
+    });
+    const refresh = client.alternator.refreshNodes();
+
+    try {
+      await started;
+      const write = client.send(
+        new PutItemCommand({
+          TableName: "users",
+          Item: { id: { S: "same" } },
+          ConditionExpression: "attribute_not_exists(id)",
+        }),
+      );
+
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      await expect(write).resolves.toBeDefined();
+      await expect(refresh).resolves.toEqual([
+        expect.objectContaining({ host: "rack-local-node" }),
+      ]);
+      expect(discoverySignal?.aborted).toBe(true);
+      expect(commandRequests(handler).map((request) => request.hostname)).toEqual([
+        "rack-local-node",
+      ]);
+    } finally {
+      client.destroy();
+      vi.useRealTimers();
     }
   });
 

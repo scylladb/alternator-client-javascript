@@ -32,6 +32,7 @@ type RackDatacenterProbeKind = "datacenter" | "rack";
 interface DiscoveryDeadlineContext {
   referenced: boolean;
   readonly timers: Set<ReturnType<typeof setTimeout>>;
+  expiredError?: Error;
 }
 
 interface InFlightRefresh {
@@ -52,9 +53,12 @@ interface ClusterDiscoveryResult {
 interface ActiveDiscoveryRequest {
   readonly abortController: AbortController;
   readonly cancellation: Promise<never>;
-  readonly cancel: () => void;
+  readonly cancel: (error: Error) => void;
+  readonly deadlines?: DiscoveryDeadlineContext;
   responseBody: unknown;
 }
+
+const KEY_ROUTE_AFFINITY_READINESS_TIMEOUT_MS = 2_000;
 
 export class AlternatorDiscovery {
   private liveHosts: string[];
@@ -98,8 +102,42 @@ export class AlternatorDiscovery {
     if (this.keyRouteAffinityReady) {
       return true;
     }
-    await this.startRefresh(true);
-    return this.keyRouteAffinityReady;
+    const refresh = this.startRefresh(true);
+    const inFlightRefresh = this.inFlightRefresh;
+    if (!inFlightRefresh) {
+      return false;
+    }
+
+    const timeoutMs = this.config.discovery.timeoutMs > 0
+      ? this.config.discovery.timeoutMs
+      : KEY_ROUTE_AFFINITY_READINESS_TIMEOUT_MS;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const timeoutResult = new Promise<false>((resolve) => {
+      timeout = setTimeout(() => {
+        const error = new Error(`key-route affinity discovery timed out after ${timeoutMs} ms`);
+        this.expireDiscovery(inFlightRefresh.deadlines, error);
+        resolve(false);
+      }, timeoutMs);
+      this.activeDeadlines.add(timeout);
+      inFlightRefresh.deadlines.timers.add(timeout);
+    });
+
+    try {
+      const completed = await Promise.race([
+        refresh.then(
+          () => true,
+          () => false,
+        ),
+        timeoutResult,
+      ]);
+      return completed && this.keyRouteAffinityReady;
+    } finally {
+      if (timeout) {
+        this.activeDeadlines.delete(timeout);
+        inFlightRefresh.deadlines.timers.delete(timeout);
+        clearTimeout(timeout);
+      }
+    }
   }
 
   createQueryPlan(preferredNode?: AlternatorNode): AlternatorQueryPlan {
@@ -215,7 +253,19 @@ export class AlternatorDiscovery {
     for (const request of this.activeRequests) {
       request.abortController.abort();
       destroyResponseBody(request.responseBody);
-      request.cancel();
+      request.cancel(new Error("Alternator discovery has been destroyed"));
+    }
+  }
+
+  private expireDiscovery(deadlines: DiscoveryDeadlineContext, error: Error): void {
+    deadlines.expiredError ??= error;
+    for (const request of this.activeRequests) {
+      if (request.deadlines !== deadlines) {
+        continue;
+      }
+      request.abortController.abort();
+      destroyResponseBody(request.responseBody);
+      request.cancel(error);
     }
   }
 
@@ -393,6 +443,9 @@ export class AlternatorDiscovery {
     if (this.destroyed) {
       throw new Error("Alternator discovery has been destroyed");
     }
+    if (deadlines?.expiredError) {
+      throw deadlines.expiredError;
+    }
 
     const request = new HttpRequest({
       protocol: `${this.config.scheme}:`,
@@ -414,7 +467,8 @@ export class AlternatorDiscovery {
     const activeRequest: ActiveDiscoveryRequest = {
       abortController,
       cancellation,
-      cancel: () => rejectCancellation(new Error("Alternator discovery has been destroyed")),
+      cancel: rejectCancellation,
+      ...(deadlines ? { deadlines } : {}),
       responseBody: undefined,
     };
     this.activeRequests.add(activeRequest);
