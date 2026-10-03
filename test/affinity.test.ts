@@ -71,6 +71,72 @@ describe("key route affinity", () => {
     expect(first?.hostname).toBe(second?.hostname);
   });
 
+  it("keeps cluster affinity immediate across incomplete discovery", async () => {
+    const seedNodes = testNodes(["seed-a", "seed-b"], 8080);
+    const initialTarget = nodeByHost(seedNodes, "seed-b");
+    const initialKey = partitionKeyValuesForNode(seedNodes, initialTarget, "initial", 1)[0]!;
+    const partialHosts = ["node-a", "node-b"];
+    const partialNodes = testNodes(partialHosts, 8080);
+    const partialTarget = nodeByHost(partialNodes, "node-b");
+    const partialKey = partitionKeyValuesForNode(partialNodes, partialTarget, "partial", 1)[0]!;
+    const handler = new RecordingHandler((request) => {
+      if (request.path !== "/localnodes") {
+        return {};
+      }
+      if (request.hostname === "seed-a") {
+        return partialHosts;
+      }
+      throw new Error("seed-b unavailable");
+    });
+    const client = new AlternatorDynamoDBClient({
+      seeds: ["seed-a", "seed-b"],
+      requestHandler: handler,
+      discovery: { background: false },
+      routing: routing.cluster(),
+      keyRouteAffinity: {
+        mode: "read-before-write",
+        partitionKeys: { users: "id" },
+      },
+      maxAttempts: 1,
+    });
+    vi.spyOn(Math, "random").mockReturnValue(0);
+
+    try {
+      await client.send(
+        new PutItemCommand({
+          TableName: "users",
+          Item: { id: { S: initialKey } },
+          ConditionExpression: "attribute_not_exists(id)",
+        }),
+      );
+      expect(handler.requests.filter((request) => request.path === "/localnodes")).toHaveLength(0);
+
+      await expect(client.alternator.refreshNodes()).resolves.toEqual(
+        partialNodes,
+      );
+      await client.send(
+        new PutItemCommand({
+          TableName: "users",
+          Item: { id: { S: partialKey } },
+          ConditionExpression: "attribute_not_exists(id)",
+        }),
+      );
+
+      expect(commandRequests(handler).map((request) => request.hostname)).toEqual([
+        "seed-b",
+        "node-b",
+      ]);
+      expect(
+        handler.requests
+          .filter((request) => request.path === "/localnodes")
+          .map((request) => request.hostname),
+      ).toEqual(["seed-a", "seed-b"]);
+    } finally {
+      client.destroy();
+      vi.restoreAllMocks();
+    }
+  });
+
   it("discovers affinity nodes before routing different rack seeds", async () => {
     const clusterHosts = ["rack-a-node", "rack-b-node", "rack-c-node"];
     const clusterNodes = testNodes(clusterHosts, 8080);

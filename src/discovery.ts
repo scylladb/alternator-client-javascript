@@ -95,6 +95,10 @@ export class AlternatorDiscovery {
     return this.keyRouteAffinityHosts.map((host) => this.toNode(host));
   }
 
+  requiresKeyRouteAffinityReadiness(): boolean {
+    return this.config.routing.kind !== "cluster";
+  }
+
   async ensureKeyRouteAffinityReady(): Promise<boolean> {
     if (!this.config.keyRouteAffinity.enabled) {
       return false;
@@ -303,9 +307,11 @@ export class AlternatorDiscovery {
         if (nodes.length > 0) {
           this.liveHosts = normalizeDiscoveredHosts(nodes);
           if (scope.kind === "cluster") {
-            if (clusterDiscovery?.complete) {
-              this.publishKeyRouteAffinityHosts(clusterDiscovery.nodes);
-            }
+            // Cluster routing already uses this discovery result directly. Keep
+            // its pre-existing affinity semantics even when only some seeds
+            // contributed to the union; completeness gating is only needed
+            // when affinity must override a narrower routing scope.
+            this.publishKeyRouteAffinityHosts(this.liveHosts);
           } else {
             await this.refreshKeyRouteAffinityHosts(deadlines);
           }

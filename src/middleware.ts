@@ -249,7 +249,11 @@ async function createQueryPlan<Input extends object>(
     discovery.getKeyRouteAffinityNodes(),
     context.commandName,
   );
-  if (!affinityPlan || !(await discovery.ensureKeyRouteAffinityReady())) {
+  if (
+    !affinityPlan ||
+    (discovery.requiresKeyRouteAffinityReadiness() &&
+      !(await discovery.ensureKeyRouteAffinityReady()))
+  ) {
     return discovery.createQueryPlan();
   }
   return keyAffinity.queryPlanForInput(
