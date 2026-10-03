@@ -244,7 +244,7 @@ function createQueryPlan<Input extends object>(
   discovery: AlternatorDiscovery,
   keyAffinity: KeyRouteAffinityPlanner,
 ): AlternatorQueryPlan {
-  const nodes = discovery.getLiveNodes();
+  const nodes = discovery.getKeyRouteAffinityNodes();
   return keyAffinity.queryPlanForInput(input, nodes, context.commandName) ?? discovery.createQueryPlan();
 }
 

@@ -17,10 +17,13 @@
 import { BatchWriteItemCommand, PutItemCommand } from "@aws-sdk/client-dynamodb";
 import { describe, expect, it } from "vitest";
 import { hashAttributeValue, KeyRouteAffinityPlanner } from "../src/affinity.js";
-import { AlternatorDynamoDBClient } from "../src/index.js";
+import { AlternatorDynamoDBClient, routing } from "../src/index.js";
 import { firstNodeWithSeed } from "../src/query-plan.js";
 import type { AlternatorKeyRouteAffinityMode, AlternatorLogger, AlternatorNode } from "../src/types.js";
 import { commandRequests, RecordingHandler } from "./helpers.js";
+
+const missingDatacenter = "__alternator_client_missing_dc__";
+const missingRack = "__alternator_client_missing_rack__";
 
 describe("key route affinity", () => {
   it("matches AttributeValue hash vectors", () => {
@@ -66,6 +69,79 @@ describe("key route affinity", () => {
 
     const [first, second] = commandRequests(handler);
     expect(first?.hostname).toBe(second?.hostname);
+  });
+
+  it("routes affinity writes cluster-wide while keeping other requests rack-local", async () => {
+    const clusterHosts = ["rack-a-node", "rack-b-node", "rack-c-node"];
+    const clusterNodes = testNodes(clusterHosts, 8080);
+    const targetNode = nodeByHost(clusterNodes, "rack-c-node");
+    const partitionKey = partitionKeyValuesForNode(clusterNodes, targetNode, "shared", 1)[0]!;
+    const createRackClient = (rack: string, rackHost: string) => {
+      const handler = new RecordingHandler((request) => {
+        if (request.path !== "/localnodes") {
+          return {};
+        }
+        if (request.query.dc === missingDatacenter || request.query.rack === missingRack) {
+          return [];
+        }
+        if (request.query.dc === "dc1" && request.query.rack === rack) {
+          return [rackHost];
+        }
+        if (Object.keys(request.query).length === 0) {
+          return clusterHosts;
+        }
+        return [];
+      });
+      const client = new AlternatorDynamoDBClient({
+        seeds: ["seed"],
+        requestHandler: handler,
+        discovery: { background: false },
+        routing: routing.rack({ datacenter: "dc1", rack }),
+        keyRouteAffinity: {
+          mode: "read-before-write",
+          partitionKeys: { users: "id" },
+        },
+      });
+      return { client, handler };
+    };
+    const rackA = createRackClient("rack-a", "rack-a-node");
+    const rackB = createRackClient("rack-b", "rack-b-node");
+
+    try {
+      await rackA.client.alternator.refreshNodes();
+      await rackB.client.alternator.refreshNodes();
+
+      expect(rackA.client.alternator.nodes().map((node) => node.host)).toEqual(["rack-a-node"]);
+      expect(rackB.client.alternator.nodes().map((node) => node.host)).toEqual(["rack-b-node"]);
+
+      for (const { client } of [rackA, rackB]) {
+        await client.send(
+          new PutItemCommand({
+            TableName: "users",
+            Item: { id: { S: partitionKey } },
+            ConditionExpression: "attribute_not_exists(id)",
+          }),
+        );
+        await client.send(
+          new PutItemCommand({
+            TableName: "users",
+            Item: { id: { S: partitionKey } },
+          }),
+        );
+      }
+
+      expect(commandRequests(rackA.handler).map((request) => request.hostname)).toEqual([
+        "rack-c-node",
+        "rack-a-node",
+      ]);
+      expect(commandRequests(rackB.handler).map((request) => request.hostname)).toEqual([
+        "rack-c-node",
+        "rack-b-node",
+      ]);
+    } finally {
+      rackA.client.destroy();
+      rackB.client.destroy();
+    }
   });
 
   it("uses BatchWrite voting to pick a preferred node", async () => {

@@ -48,6 +48,7 @@ interface ActiveDiscoveryRequest {
 
 export class AlternatorDiscovery {
   private liveHosts: string[];
+  private keyRouteAffinityHosts: string[];
   private refreshTimer: ReturnType<typeof setInterval> | undefined;
   private lastRefreshAttempt = 0;
   private inFlightRefresh: InFlightRefresh | undefined;
@@ -61,6 +62,7 @@ export class AlternatorDiscovery {
     private readonly forwardRequestTimeoutToHandler: boolean,
   ) {
     this.liveHosts = [...config.seeds];
+    this.keyRouteAffinityHosts = [...config.seeds];
     if (config.runtime === "node" && config.discovery.background && config.discovery.refreshIntervalMs > 0) {
       this.refreshTimer = setInterval(() => {
         this.startRefresh(false).catch(() => undefined);
@@ -71,6 +73,10 @@ export class AlternatorDiscovery {
 
   getLiveNodes(): AlternatorNode[] {
     return this.liveHosts.map((host) => this.toNode(host));
+  }
+
+  getKeyRouteAffinityNodes(): AlternatorNode[] {
+    return this.keyRouteAffinityHosts.map((host) => this.toNode(host));
   }
 
   createQueryPlan(preferredNode?: AlternatorNode): AlternatorQueryPlan {
@@ -221,6 +227,11 @@ export class AlternatorDiscovery {
         }
         if (nodes.length > 0) {
           this.liveHosts = normalizeDiscoveredHosts(nodes);
+          if (scope.kind === "cluster") {
+            this.keyRouteAffinityHosts = this.liveHosts;
+          } else {
+            await this.refreshKeyRouteAffinityHosts(deadlines);
+          }
           return this.getLiveNodes();
         }
       } catch (error) {
@@ -231,7 +242,19 @@ export class AlternatorDiscovery {
       }
     }
 
+    await this.refreshKeyRouteAffinityHosts(deadlines);
     return this.getLiveNodes();
+  }
+
+  private async refreshKeyRouteAffinityHosts(deadlines: DiscoveryDeadlineContext): Promise<void> {
+    if (!this.config.keyRouteAffinity.enabled) {
+      return;
+    }
+
+    const nodes = await this.fetchClusterLocalNodes(deadlines);
+    if (nodes.length > 0) {
+      this.keyRouteAffinityHosts = normalizeDiscoveredHosts(nodes);
+    }
   }
 
   private candidateHosts(): string[] {

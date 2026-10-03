@@ -385,7 +385,11 @@ keyRouteAffinity: {
 The client hashes DynamoDB `S`, `N`, and `B` partition-key AttributeValues with
 the same Murmur3 format as Alternator affinity routing. The hash seeds a
 deterministic query plan over lexicographically sorted node URLs, so the same
-partition key selects the same first node. In `any-write` mode,
+partition key selects the same first node. When rack- or datacenter-aware
+routing is configured, affinity-qualified requests use a separately discovered
+cluster-wide node ring; requests that do not qualify for affinity remain in the
+configured routing scope. Include a seed from each datacenter that should be
+part of the affinity ring. In `any-write` mode,
 `BatchWriteItem` uses voting: each usable write candidate votes for its seeded
 first node. Voted coordinators are tried by vote count descending, ties use
 canonical node-address order, and zero-vote live coordinators follow in

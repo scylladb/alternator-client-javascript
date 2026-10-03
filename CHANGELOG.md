@@ -6,6 +6,11 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Key-route affinity now chooses coordinators from a cluster-wide discovered
+  node ring when normal request routing is scoped to a rack or datacenter.
+
 ### Changed
 
 - Replaced Docker Compose integration-test provisioning with a repository-pinned
