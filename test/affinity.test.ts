@@ -137,6 +137,64 @@ describe("key route affinity", () => {
     }
   });
 
+  it("keeps affinity unready after a partial cluster fallback", async () => {
+    const partialHosts = ["cluster-a", "cluster-b"];
+    const partialNodes = testNodes(partialHosts, 8080);
+    const affinityTarget = nodeByHost(partialNodes, "cluster-b");
+    const partitionKey = partitionKeyValuesForNode(
+      partialNodes,
+      affinityTarget,
+      "fallback",
+      1,
+    )[0]!;
+    const handler = new RecordingHandler((request) => {
+      if (request.path !== "/localnodes") {
+        return {};
+      }
+      if (Object.keys(request.query).length > 0) {
+        return [];
+      }
+      if (request.hostname === "seed-a") {
+        return partialHosts;
+      }
+      throw new Error("seed-b unavailable");
+    });
+    const client = new AlternatorDynamoDBClient({
+      seeds: ["seed-a", "seed-b"],
+      requestHandler: handler,
+      discovery: { background: false },
+      routing: routing.rack({
+        datacenter: "dc1",
+        rack: "rack-local",
+        fallback: routing.cluster(),
+      }),
+      keyRouteAffinity: {
+        mode: "read-before-write",
+        partitionKeys: { users: "id" },
+      },
+      maxAttempts: 1,
+    });
+    vi.spyOn(Math, "random").mockReturnValue(0);
+
+    try {
+      await client.send(
+        new PutItemCommand({
+          TableName: "users",
+          Item: { id: { S: partitionKey } },
+          ConditionExpression: "attribute_not_exists(id)",
+        }),
+      );
+
+      expect(commandRequests(handler).map((request) => request.hostname)).toEqual([
+        "cluster-a",
+      ]);
+      expect(client.alternator.nodes()).toEqual(partialNodes);
+    } finally {
+      client.destroy();
+      vi.restoreAllMocks();
+    }
+  });
+
   it("discovers affinity nodes before routing different rack seeds", async () => {
     const clusterHosts = ["rack-a-node", "rack-b-node", "rack-c-node"];
     const clusterNodes = testNodes(clusterHosts, 8080);

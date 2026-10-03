@@ -307,11 +307,12 @@ export class AlternatorDiscovery {
         if (nodes.length > 0) {
           this.liveHosts = normalizeDiscoveredHosts(nodes);
           if (scope.kind === "cluster") {
-            // Cluster routing already uses this discovery result directly. Keep
-            // its pre-existing affinity semantics even when only some seeds
-            // contributed to the union; completeness gating is only needed
-            // when affinity must override a narrower routing scope.
-            this.publishKeyRouteAffinityHosts(this.liveHosts);
+            if (this.config.routing.kind === "cluster" || clusterDiscovery?.complete) {
+              // A top-level cluster scope keeps its pre-existing partial-union
+              // semantics. Cluster reached through a narrower scope's fallback
+              // must still satisfy the complete affinity-ring requirement.
+              this.publishKeyRouteAffinityHosts(this.liveHosts);
+            }
           } else {
             await this.refreshKeyRouteAffinityHosts(deadlines);
           }
