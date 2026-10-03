@@ -51,8 +51,8 @@ TypeScript declarations.
 `make test-all` installs the repository-pinned `scylla-ccm`, provisions a
 native three-node Scylla cluster, runs the integration suite, and removes the
 cluster. The default cluster uses Scylla `release:2025.2.5`, one datacenter and
-rack, HTTP and HTTPS, two processing units and 1,024 MiB per node, and disabled
-authentication and authorization.
+three racks, HTTP and HTTPS, two processing units and 1,024 MiB per node, and
+disabled authentication and authorization.
 
 The CCM harness accepts these environment overrides:
 

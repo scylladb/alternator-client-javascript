@@ -16,6 +16,7 @@
 
 import {
   AlternatorTransport,
+  ClusterTopology,
   defaultClusterSpec,
   TestClusters,
 } from "../testinfra/ccm/index.js";
@@ -29,11 +30,18 @@ export default async function setupIntegrationCluster(): Promise<() => Promise<v
     return () => Promise.resolve();
   }
 
-  const lease = await TestClusters.acquireReusable(defaultClusterSpec());
+  const lease = await TestClusters.acquireReusable(
+    defaultClusterSpec().withTopology(ClusterTopology.singleDatacenter(1, 1, 1)),
+  );
   const http = lease.cluster.connection(AlternatorTransport.HTTP);
   const https = lease.cluster.connection(AlternatorTransport.HTTPS);
   const firstNode = lease.cluster.nodes[0];
-  if (firstNode === undefined || https.caCertificatePath === undefined) {
+  const secondRackNode = lease.cluster.nodes.find((node) => node.rack !== firstNode?.rack);
+  if (
+    firstNode === undefined ||
+    secondRackNode === undefined ||
+    https.caCertificatePath === undefined
+  ) {
     await lease.close();
     await TestClusters.closeAll();
     throw new Error("Default CCM cluster did not provide required node and HTTPS CA metadata");
@@ -44,6 +52,8 @@ export default async function setupIntegrationCluster(): Promise<() => Promise<v
   process.env.ALTERNATOR_HTTPS_PORT = https.seedEndpoint.port;
   process.env.ALTERNATOR_DATACENTER = firstNode.datacenter;
   process.env.ALTERNATOR_RACK = firstNode.rack;
+  process.env.ALTERNATOR_SECOND_RACK_HOST = secondRackNode.address;
+  process.env.ALTERNATOR_SECOND_RACK = secondRackNode.rack;
   process.env.ALTERNATOR_CA_CERT_PATH = https.caCertificatePath;
   process.env.ALTERNATOR_RESOURCE_PREFIX = lease.resources.prefix;
   process.env.ALTERNATOR_ACCESS_KEY_ID = http.credentials?.accessKeyId ?? "test";

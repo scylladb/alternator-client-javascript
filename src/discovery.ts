@@ -32,6 +32,7 @@ type RackDatacenterProbeKind = "datacenter" | "rack";
 interface DiscoveryDeadlineContext {
   referenced: boolean;
   readonly timers: Set<ReturnType<typeof setTimeout>>;
+  expiredError?: Error;
 }
 
 interface InFlightRefresh {
@@ -39,18 +40,34 @@ interface InFlightRefresh {
   readonly deadlines: DiscoveryDeadlineContext;
 }
 
+interface InFlightKeyRouteAffinityRefresh {
+  readonly promise: Promise<boolean>;
+  readonly deadlines: DiscoveryDeadlineContext;
+}
+
+interface ClusterDiscoveryResult {
+  readonly nodes: string[];
+  readonly complete: boolean;
+}
+
 interface ActiveDiscoveryRequest {
   readonly abortController: AbortController;
   readonly cancellation: Promise<never>;
-  readonly cancel: () => void;
+  readonly cancel: (error: Error) => void;
+  readonly deadlines?: DiscoveryDeadlineContext;
   responseBody: unknown;
 }
 
+const KEY_ROUTE_AFFINITY_READINESS_TIMEOUT_MS = 2_000;
+
 export class AlternatorDiscovery {
   private liveHosts: string[];
+  private keyRouteAffinityHosts: string[];
+  private keyRouteAffinityReady = false;
   private refreshTimer: ReturnType<typeof setInterval> | undefined;
   private lastRefreshAttempt = 0;
   private inFlightRefresh: InFlightRefresh | undefined;
+  private inFlightKeyRouteAffinityRefresh: InFlightKeyRouteAffinityRefresh | undefined;
   private readonly activeDeadlines = new Set<ReturnType<typeof setTimeout>>();
   private readonly activeRequests = new Set<ActiveDiscoveryRequest>();
   private destroyed = false;
@@ -61,6 +78,7 @@ export class AlternatorDiscovery {
     private readonly forwardRequestTimeoutToHandler: boolean,
   ) {
     this.liveHosts = [...config.seeds];
+    this.keyRouteAffinityHosts = [...config.seeds];
     if (config.runtime === "node" && config.discovery.background && config.discovery.refreshIntervalMs > 0) {
       this.refreshTimer = setInterval(() => {
         this.startRefresh(false).catch(() => undefined);
@@ -71,6 +89,59 @@ export class AlternatorDiscovery {
 
   getLiveNodes(): AlternatorNode[] {
     return this.liveHosts.map((host) => this.toNode(host));
+  }
+
+  getKeyRouteAffinityNodes(): AlternatorNode[] {
+    return this.keyRouteAffinityHosts.map((host) => this.toNode(host));
+  }
+
+  requiresKeyRouteAffinityReadiness(): boolean {
+    return this.config.routing.kind !== "cluster";
+  }
+
+  async ensureKeyRouteAffinityReady(): Promise<boolean> {
+    if (!this.config.keyRouteAffinity.enabled) {
+      return false;
+    }
+    if (this.keyRouteAffinityReady) {
+      return true;
+    }
+    const refresh = this.startRefresh(true);
+    const inFlightRefresh = this.inFlightRefresh;
+    if (!inFlightRefresh) {
+      return false;
+    }
+
+    const timeoutMs = this.config.discovery.timeoutMs > 0
+      ? this.config.discovery.timeoutMs
+      : KEY_ROUTE_AFFINITY_READINESS_TIMEOUT_MS;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const timeoutResult = new Promise<false>((resolve) => {
+      timeout = setTimeout(() => {
+        const error = new Error(`key-route affinity discovery timed out after ${timeoutMs} ms`);
+        this.expireDiscovery(inFlightRefresh.deadlines, error);
+        resolve(false);
+      }, timeoutMs);
+      this.activeDeadlines.add(timeout);
+      inFlightRefresh.deadlines.timers.add(timeout);
+    });
+
+    try {
+      const completed = await Promise.race([
+        refresh.then(
+          () => true,
+          () => false,
+        ),
+        timeoutResult,
+      ]);
+      return completed && this.keyRouteAffinityReady;
+    } finally {
+      if (timeout) {
+        this.activeDeadlines.delete(timeout);
+        inFlightRefresh.deadlines.timers.delete(timeout);
+        clearTimeout(timeout);
+      }
+    }
   }
 
   createQueryPlan(preferredNode?: AlternatorNode): AlternatorQueryPlan {
@@ -186,7 +257,19 @@ export class AlternatorDiscovery {
     for (const request of this.activeRequests) {
       request.abortController.abort();
       destroyResponseBody(request.responseBody);
-      request.cancel();
+      request.cancel(new Error("Alternator discovery has been destroyed"));
+    }
+  }
+
+  private expireDiscovery(deadlines: DiscoveryDeadlineContext, error: Error): void {
+    deadlines.expiredError ??= error;
+    for (const request of this.activeRequests) {
+      if (request.deadlines !== deadlines) {
+        continue;
+      }
+      request.abortController.abort();
+      destroyResponseBody(request.responseBody);
+      request.cancel(error);
     }
   }
 
@@ -198,8 +281,10 @@ export class AlternatorDiscovery {
     for (const scope of routingChain(this.config.routing)) {
       try {
         let nodes: string[];
+        let clusterDiscovery: ClusterDiscoveryResult | undefined;
         if (scope.kind === "cluster") {
-          nodes = await this.fetchClusterLocalNodes(deadlines);
+          clusterDiscovery = await this.fetchClusterLocalNodes(deadlines);
+          nodes = clusterDiscovery.nodes;
         } else {
           datacenterSupport ??= await this.probeRackDatacenterSupport("datacenter", deadlines);
           if (datacenterSupport === "unsupported") {
@@ -221,6 +306,16 @@ export class AlternatorDiscovery {
         }
         if (nodes.length > 0) {
           this.liveHosts = normalizeDiscoveredHosts(nodes);
+          if (scope.kind === "cluster") {
+            if (this.config.routing.kind === "cluster" || clusterDiscovery?.complete) {
+              // A top-level cluster scope keeps its pre-existing partial-union
+              // semantics. Cluster reached through a narrower scope's fallback
+              // must still satisfy the complete affinity-ring requirement.
+              this.publishKeyRouteAffinityHosts(this.liveHosts);
+            }
+          } else {
+            await this.refreshKeyRouteAffinityHosts(deadlines);
+          }
           return this.getLiveNodes();
         }
       } catch (error) {
@@ -231,26 +326,74 @@ export class AlternatorDiscovery {
       }
     }
 
+    await this.refreshKeyRouteAffinityHosts(deadlines);
     return this.getLiveNodes();
+  }
+
+  private refreshKeyRouteAffinityHosts(deadlines: DiscoveryDeadlineContext): Promise<boolean> {
+    if (!this.config.keyRouteAffinity.enabled) {
+      return Promise.resolve(false);
+    }
+    if (this.inFlightKeyRouteAffinityRefresh) {
+      if (deadlines.referenced) {
+        referenceDiscoveryDeadlines(this.inFlightKeyRouteAffinityRefresh.deadlines);
+      }
+      return this.inFlightKeyRouteAffinityRefresh.promise;
+    }
+
+    const promise = this.refreshKeyRouteAffinityHostsOnce(deadlines).finally(() => {
+      this.inFlightKeyRouteAffinityRefresh = undefined;
+    });
+    this.inFlightKeyRouteAffinityRefresh = { promise, deadlines };
+    return promise;
+  }
+
+  private async refreshKeyRouteAffinityHostsOnce(
+    deadlines: DiscoveryDeadlineContext,
+  ): Promise<boolean> {
+    const discovery = await this.fetchClusterLocalNodes(
+      deadlines,
+      this.config.discovery.timeoutMs > 0 ? this.config.discovery.timeoutMs : 2_000,
+    );
+    if (discovery.complete) {
+      this.publishKeyRouteAffinityHosts(discovery.nodes);
+    }
+    return this.keyRouteAffinityReady;
+  }
+
+  private publishKeyRouteAffinityHosts(hosts: readonly string[]): void {
+    const normalized = normalizeDiscoveredHosts(hosts);
+    if (normalized.length === 0) {
+      return;
+    }
+    this.keyRouteAffinityHosts = normalized;
+    this.keyRouteAffinityReady = true;
   }
 
   private candidateHosts(): string[] {
     return [...new Set([...this.liveHosts, ...this.config.seeds])];
   }
 
-  private async fetchClusterLocalNodes(deadlines: DiscoveryDeadlineContext): Promise<string[]> {
+  private async fetchClusterLocalNodes(
+    deadlines: DiscoveryDeadlineContext,
+    timeoutMs?: number,
+  ): Promise<ClusterDiscoveryResult> {
     const nodes: string[] = [];
     const query: LocalNodesQuery = {};
+    let complete = true;
 
     for (const host of this.config.seeds) {
       try {
-        const discovered = await this.fetchLocalNodes(host, query, deadlines);
-        if (discovered.length > 0) {
-          nodes.push(...discovered);
+        const discovered = await this.fetchLocalNodes(host, query, deadlines, timeoutMs);
+        const normalized = normalizeDiscoveredHosts(discovered);
+        if (normalized.length > 0) {
+          nodes.push(...normalized);
         } else {
+          complete = false;
           this.config.logger.debug?.("alternator discovery: localnodes returned no nodes", { host, query });
         }
       } catch (error) {
+        complete = false;
         this.config.logger.debug?.("alternator discovery: localnodes request failed", {
           host,
           query,
@@ -259,7 +402,10 @@ export class AlternatorDiscovery {
       }
     }
 
-    return normalizeDiscoveredHosts(nodes);
+    return {
+      nodes: normalizeDiscoveredHosts(nodes),
+      complete,
+    };
   }
 
   private async fetchFirstAvailableLocalNodes(
@@ -299,9 +445,13 @@ export class AlternatorDiscovery {
     host: string,
     query: LocalNodesQuery,
     deadlines?: DiscoveryDeadlineContext,
+    timeoutOverrideMs?: number,
   ): Promise<string[]> {
     if (this.destroyed) {
       throw new Error("Alternator discovery has been destroyed");
+    }
+    if (deadlines?.expiredError) {
+      throw deadlines.expiredError;
     }
 
     const request = new HttpRequest({
@@ -315,7 +465,7 @@ export class AlternatorDiscovery {
         host: hostHeader(host, this.config.port),
       },
     });
-    const timeoutMs = this.config.discovery.timeoutMs;
+    const timeoutMs = timeoutOverrideMs ?? this.config.discovery.timeoutMs;
     const abortController = new AbortController();
     let rejectCancellation!: (error: Error) => void;
     const cancellation = new Promise<never>((_resolve, reject) => {
@@ -324,7 +474,8 @@ export class AlternatorDiscovery {
     const activeRequest: ActiveDiscoveryRequest = {
       abortController,
       cancellation,
-      cancel: () => rejectCancellation(new Error("Alternator discovery has been destroyed")),
+      cancel: rejectCancellation,
+      ...(deadlines ? { deadlines } : {}),
       responseBody: undefined,
     };
     this.activeRequests.add(activeRequest);
