@@ -382,17 +382,35 @@ keyRouteAffinity: {
 }
 ```
 
-The client hashes DynamoDB `S`, `N`, and `B` partition-key AttributeValues with
-the same Murmur3 format as Alternator affinity routing. The hash seeds a
+The client hashes DynamoDB `S`, `N`, and `B` partition-key AttributeValues
+with the same Murmur3 format as Alternator affinity routing. The hash seeds a
 deterministic query plan over lexicographically sorted node URLs, so the same
-partition key selects the same first node. In `any-write` mode,
-`BatchWriteItem` uses voting: each usable write candidate votes for its seeded
-first node. Voted coordinators are tried by vote count descending, ties use
-canonical node-address order, and zero-vote live coordinators follow in
-canonical order. The client falls back to the normal query plan only when no
-candidate can vote. If one table lacks partition-key metadata and
-`autoDiscoverPartitionKeys` is enabled, the client starts a background
-`DescribeTable` lookup for that table while other usable tables can still vote.
+partition key selects the same first node. When the configured routing chain
+contains a rack restriction, affinity resolves a separate discovery chain at
+initialization. It replaces each rack with its named datacenter and preserves
+all explicit fallbacks in order. For example, rack(A,r1) → rack(B,r2) →
+cluster becomes DC(A) → DC(B) → cluster. No implicit fallback is added. Named
+datacenters are discovered through `/localnodes?dc=<configured-dc>`, so other
+datacenters stay excluded while an earlier configured datacenter is usable.
+Ordinary requests retain their configured scope. Equivalent affinity
+operations are deduplicated by query and seed aggregation in first-occurrence
+order. Matching ordinary and affinity results, including empty results, are
+reused within one refresh attempt; later refreshes retry discovery. Disabled
+affinity and matching views add no discovery. Clients in different racks
+converge after successful datacenter discovery when their candidate membership
+matches. Before that, requests may use seed or rack membership. Empty or
+failed refreshes retain the last successful affinity snapshot, and existing
+startup and timeout behavior is unchanged. Exhausting ordinary discovery
+retains both views without an auxiliary discovery pass. Each eligible request
+keeps its captured affinity membership and retry order across topology updates
+and plan exhaustion. In `any-write` mode, `BatchWriteItem` uses voting: each
+usable write candidate votes for its seeded first node. Voted coordinators are
+tried by vote count descending, ties use canonical node-address order, and
+zero-vote live coordinators follow in canonical order. The client falls back
+to the normal query plan only when no candidate can vote. If one table lacks
+partition-key metadata and `autoDiscoverPartitionKeys` is enabled, the client
+starts a background `DescribeTable` lookup for that table while other usable
+tables can still vote.
 
 Per request, the client creates a lazy node query plan. When the AWS retry
 strategy retries a transport failure or retryable service response, the next

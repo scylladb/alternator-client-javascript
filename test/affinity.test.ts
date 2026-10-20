@@ -14,13 +14,16 @@
  * limitations under the License.
  */
 
-import { BatchWriteItemCommand, PutItemCommand } from "@aws-sdk/client-dynamodb";
-import { describe, expect, it } from "vitest";
+import { BatchWriteItemCommand, GetItemCommand, PutItemCommand } from "@aws-sdk/client-dynamodb";
+import { describe, expect, it, vi } from "vitest";
 import { hashAttributeValue, KeyRouteAffinityPlanner } from "../src/affinity.js";
-import { AlternatorDynamoDBClient } from "../src/index.js";
+import { AlternatorDynamoDBClient, routing } from "../src/index.js";
 import { firstNodeWithSeed } from "../src/query-plan.js";
 import type { AlternatorKeyRouteAffinityMode, AlternatorLogger, AlternatorNode } from "../src/types.js";
-import { commandRequests, RecordingHandler } from "./helpers.js";
+import { commandRequests, jsonResponse, RecordingHandler } from "./helpers.js";
+
+const missingDatacenter = "__alternator_client_missing_dc__";
+const missingRack = "__alternator_client_missing_rack__";
 
 describe("key route affinity", () => {
   it("matches AttributeValue hash vectors", () => {
@@ -66,6 +69,432 @@ describe("key route affinity", () => {
 
     const [first, second] = commandRequests(handler);
     expect(first?.hostname).toBe(second?.hostname);
+  });
+
+  it("keeps cluster affinity immediate across incomplete discovery", async () => {
+    const seedNodes = testNodes(["seed-a", "seed-b"], 8080);
+    const initialTarget = nodeByHost(seedNodes, "seed-b");
+    const initialKey = partitionKeyValuesForNode(seedNodes, initialTarget, "initial", 1)[0]!;
+    const partialHosts = ["node-a", "node-b"];
+    const partialNodes = testNodes(partialHosts, 8080);
+    const partialTarget = nodeByHost(partialNodes, "node-b");
+    const partialKey = partitionKeyValuesForNode(partialNodes, partialTarget, "partial", 1)[0]!;
+    const handler = new RecordingHandler((request) => {
+      if (request.path !== "/localnodes") {
+        return {};
+      }
+      if (request.hostname === "seed-a") {
+        return partialHosts;
+      }
+      throw new Error("seed-b unavailable");
+    });
+    const client = new AlternatorDynamoDBClient({
+      seeds: ["seed-a", "seed-b"],
+      requestHandler: handler,
+      discovery: { background: false },
+      routing: routing.cluster(),
+      keyRouteAffinity: {
+        mode: "read-before-write",
+        partitionKeys: { users: "id" },
+      },
+      maxAttempts: 1,
+    });
+    vi.spyOn(Math, "random").mockReturnValue(0);
+
+    try {
+      await client.send(
+        new PutItemCommand({
+          TableName: "users",
+          Item: { id: { S: initialKey } },
+          ConditionExpression: "attribute_not_exists(id)",
+        }),
+      );
+      expect(handler.requests.filter((request) => request.path === "/localnodes")).toHaveLength(0);
+
+      await expect(client.alternator.refreshNodes()).resolves.toEqual(
+        partialNodes,
+      );
+      await client.send(
+        new PutItemCommand({
+          TableName: "users",
+          Item: { id: { S: partialKey } },
+          ConditionExpression: "attribute_not_exists(id)",
+        }),
+      );
+
+      expect(commandRequests(handler).map((request) => request.hostname)).toEqual([
+        "seed-b",
+        "node-b",
+      ]);
+      expect(
+        handler.requests
+          .filter((request) => request.path === "/localnodes")
+          .map((request) => request.hostname),
+      ).toEqual(["seed-a", "seed-b"]);
+    } finally {
+      client.destroy();
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("routes immediately through seeds while discovery is hanging with a zero timeout", async () => {
+    let requestStarted!: () => void;
+    const started = new Promise<void>((resolve) => { requestStarted = resolve; });
+    let signal: { readonly aborted: boolean } | undefined;
+    const handler = new RecordingHandler((request, options) => {
+      if (request.path === "/localnodes") {
+        signal = options?.abortSignal;
+        requestStarted();
+        return new Promise(() => undefined);
+      }
+      return {};
+    });
+    const client = new AlternatorDynamoDBClient({
+      seeds: ["rack-seed"], requestHandler: handler,
+      discovery: { background: false, timeoutMs: 0 },
+      routing: routing.rack({ datacenter: "dc1", rack: "rack-a" }),
+      keyRouteAffinity: { mode: "read-before-write", partitionKeys: { users: "id" } },
+    });
+    const refresh = client.alternator.refreshNodes();
+    let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      deadlineTimer = setTimeout(() => reject(new Error("Seed routing waited for discovery")), 1_000);
+    });
+    try {
+      await Promise.race([started, deadline]);
+      await Promise.race([client.send(new PutItemCommand({
+        TableName: "users", Item: { id: { S: "same" } },
+        ConditionExpression: "attribute_not_exists(id)",
+      })), deadline]);
+      expect(commandRequests(handler).map((request) => request.hostname)).toEqual(["rack-seed"]);
+      expect(signal?.aborted).toBe(false);
+    } finally {
+      clearTimeout(deadlineTimer);
+      client.destroy();
+      await refresh;
+    }
+  });
+
+  it("uses the same named-DC affinity ring across racks after discovery", async () => {
+    const dcHosts = ["rack-a-node", "rack-b-node", "rack-c-node"];
+    const dcNodes = testNodes(dcHosts, 8080);
+    const key = partitionKeyValuesForNode(dcNodes, nodeByHost(dcNodes, "rack-c-node"), "shared", 1)[0]!;
+    const clients = ["a", "b"].map((rack) => {
+      const handler = new RecordingHandler((request) => {
+        if (request.path !== "/localnodes") { return {}; }
+        if (request.query.dc === missingDatacenter || request.query.rack === missingRack) { return []; }
+        if (request.query.dc === "dc1") {
+          return request.query.rack ? [`rack-${rack}-node`] : dcHosts;
+        }
+        return ["other-dc-node"];
+      });
+      const client = new AlternatorDynamoDBClient({
+        seeds: [`rack-${rack}-seed`], requestHandler: handler,
+        discovery: { background: false },
+        routing: routing.rack({ datacenter: "dc1", rack: `rack-${rack}` }),
+        keyRouteAffinity: { mode: "read-before-write", partitionKeys: { users: "id" } },
+      });
+      return { client, handler, rack };
+    });
+    try {
+      for (const { client, handler, rack } of clients) {
+        await client.alternator.refreshNodes();
+        await client.send(new PutItemCommand({
+          TableName: "users", Item: { id: { S: key } },
+          ConditionExpression: "attribute_not_exists(id)",
+        }));
+        await client.send(new PutItemCommand({ TableName: "users", Item: { id: { S: key } } }));
+        await client.send(new GetItemCommand({ TableName: "users", Key: { id: { S: key } } }));
+        await client.send(new PutItemCommand({
+          TableName: "users", Item: { other: { S: key } }, ConditionExpression: "attribute_not_exists(id)",
+        }));
+        expect(commandRequests(handler).map((request) => request.hostname)).toEqual([
+          "rack-c-node", `rack-${rack}-node`, `rack-${rack}-node`, `rack-${rack}-node`,
+        ]);
+        expect(handler.requests.filter((request) => request.path === "/localnodes")
+          .every((request) => Object.keys(request.query).length > 0)).toBe(true);
+      }
+    } finally { clients.forEach(({ client }) => client.destroy()); }
+  });
+
+  it("preserves every explicit DC fallback, preference, and recovery", async () => {
+    let phase: "preferred" | "secondary" | "cluster" = "preferred";
+    const handler = new RecordingHandler((request) => {
+      if (request.path !== "/localnodes") { return {}; }
+      if (request.query.dc === missingDatacenter || request.query.rack === missingRack) { return []; }
+      // Ordinary routing falls through both empty racks to cluster; affinity tries DC A, then B.
+      if (request.query.rack) { return []; }
+      if (request.query.dc === "A") { return phase === "preferred" ? ["preferred-node"] : []; }
+      if (request.query.dc === "B") { return phase !== "cluster" ? ["secondary-node"] : []; }
+      return ["cluster-node"];
+    });
+    const client = new AlternatorDynamoDBClient({
+      seeds: ["seed"], requestHandler: handler, discovery: { background: false },
+      routing: routing.rack({ datacenter: "A", rack: "missing", fallback: routing.rack({
+        datacenter: "B", rack: "missing", fallback: routing.cluster(),
+      }) }),
+      keyRouteAffinity: { mode: "read-before-write", partitionKeys: { users: "id" } },
+    });
+    const send = () => client.send(new PutItemCommand({
+      TableName: "users", Item: { id: { S: "same" } }, ConditionExpression: "attribute_not_exists(id)",
+    }));
+    try {
+      for (const value of ["preferred", "secondary", "cluster", "preferred"] as const) {
+        phase = value;
+        handler.requests.length = 0;
+        await client.alternator.refreshNodes();
+        const affinityQueries = handler.requests.filter((request) => request.path === "/localnodes" &&
+          request.query.rack === undefined && request.query.dc !== missingDatacenter).map((request) => request.query.dc);
+        // A usable earlier DC must win even after ordinary routing selected cluster.
+        if (phase === "preferred") { expect(affinityQueries).toEqual([undefined, "A"]); }
+        if (phase === "secondary") { expect(affinityQueries.indexOf("A")).toBeLessThan(affinityQueries.indexOf("B")); }
+        await send();
+        expect(commandRequests(handler).at(-1)?.hostname).toBe(`${value === "preferred" ? "preferred" : value === "secondary" ? "secondary" : "cluster"}-node`);
+      }
+    } finally { client.destroy(); }
+  });
+
+  it("checks the preferred widened DC before reusing an ordinary later DC fallback", async () => {
+    let preferredAvailable = true;
+    const handler = new RecordingHandler((request) => {
+      if (request.path !== "/localnodes") { return {}; }
+      if (request.query.dc === missingDatacenter || request.query.rack === missingRack || request.query.rack) { return []; }
+      return request.query.dc === "A" ? (preferredAvailable ? ["preferred"] : []) : ["fallback"];
+    });
+    const client = new AlternatorDynamoDBClient({
+      seeds: ["seed"], requestHandler: handler, discovery: { background: false },
+      routing: routing.rack({ datacenter: "A", rack: "missing", fallback: routing.datacenter({ datacenter: "B" }) }),
+      keyRouteAffinity: { mode: "read-before-write", partitionKeys: { users: "id" } },
+    });
+    try {
+      for (const available of [true, false]) {
+        preferredAvailable = available;
+        handler.requests.length = 0;
+        await client.alternator.refreshNodes();
+        expect(client.alternator.nodes().map((node) => node.host)).toEqual(["fallback"]);
+        await client.send(new PutItemCommand({
+          TableName: "users", Item: { id: { S: "same" } }, ConditionExpression: "attribute_not_exists(id)",
+        }));
+        expect(commandRequests(handler).at(-1)?.hostname).toBe(available ? "preferred" : "fallback");
+        expect(handler.requests.filter((request) => request.path === "/localnodes" && request.query.dc === "B")).toHaveLength(1);
+      }
+    } finally { client.destroy(); }
+  });
+
+  it("keeps a successful affinity snapshot through empty and failed refreshes, then recovers", async () => {
+    let phase: "empty" | "failed" | "ready" | "recovered" = "empty";
+    const handler = new RecordingHandler((request) => {
+      if (request.path !== "/localnodes") { return {}; }
+      if (request.query.dc === missingDatacenter || request.query.rack === missingRack) { return []; }
+      if (request.query.rack) { return ["rack-local"]; }
+      if (request.query.dc === "dc1") {
+        if (phase === "failed") { throw new Error("DC discovery unavailable"); }
+        return phase === "empty" ? [] : [phase === "ready" ? "dc-ready" : "dc-recovered"];
+      }
+      throw new Error("implicit cluster discovery is forbidden");
+    });
+    const client = new AlternatorDynamoDBClient({
+      seeds: ["seed"], requestHandler: handler, discovery: { background: false },
+      routing: routing.rack({ datacenter: "dc1", rack: "rack-a" }),
+      keyRouteAffinity: { mode: "read-before-write", partitionKeys: { users: "id" } },
+    });
+    try {
+      for (const [value, expected] of [["empty", "rack-local"], ["failed", "rack-local"],
+        ["ready", "dc-ready"], ["empty", "dc-ready"], ["failed", "dc-ready"],
+        ["recovered", "dc-recovered"]] as const) {
+        phase = value;
+        await client.alternator.refreshNodes();
+        await client.send(new PutItemCommand({
+          TableName: "users", Item: { id: { S: "same" } }, ConditionExpression: "attribute_not_exists(id)",
+        }));
+        expect(commandRequests(handler).at(-1)?.hostname).toBe(expected);
+      }
+      expect(handler.requests.filter((request) => request.path === "/localnodes")
+        .every((request) => Object.keys(request.query).length > 0)).toBe(true);
+    } finally { client.destroy(); }
+  });
+
+  it.each([
+    { name: "disabled affinity", enabled: false, scope: routing.rack({ datacenter: "dc1", rack: "rack-a" }), query: { dc: "dc1", rack: "rack-a" } },
+    { name: "DC without rack restrictions", enabled: true, scope: routing.datacenter({ datacenter: "dc1" }), query: { dc: "dc1" } },
+    { name: "selected DC before a rack fallback", enabled: true, scope: routing.datacenter({ datacenter: "dc1", fallback: routing.rack({ datacenter: "dc2", rack: "rack-b" }) }), query: { dc: "dc1" } },
+  ])("avoids auxiliary discovery for $name", async ({ enabled, scope, query }) => {
+    const handler = new RecordingHandler((request) => {
+      if (request.path !== "/localnodes") { return {}; }
+      if (request.query.dc === missingDatacenter || request.query.rack === missingRack) { return []; }
+      return ["local-node"];
+    });
+    const client = new AlternatorDynamoDBClient({
+      seeds: ["seed"], requestHandler: handler, discovery: { background: false }, routing: scope,
+      keyRouteAffinity: enabled ? { mode: "read-before-write", partitionKeys: { users: "id" } } : false,
+    });
+    try {
+      await client.alternator.refreshNodes();
+      expect(handler.requests.filter((request) => request.path === "/localnodes" &&
+        request.query.dc !== missingDatacenter && request.query.rack !== missingRack)
+        .map((request) => request.query)).toEqual([query]);
+    } finally { client.destroy(); }
+  });
+
+  it("uses discovered DC membership for batch voting and single-item retries", async () => {
+    const hosts = ["rack-local", "rack-other"];
+    const nodes = testNodes(hosts, 8080);
+    const key = partitionKeyValuesForNode(nodes, nodeByHost(nodes, "rack-other"), "votes", 1)[0]!;
+    let failNext = false;
+    const handler = new RecordingHandler((request) => {
+      if (request.path === "/localnodes") {
+        if (request.query.dc === missingDatacenter || request.query.rack === missingRack) { return []; }
+        return request.query.rack ? ["rack-local"] : hosts;
+      }
+      if (failNext) { failNext = false; return jsonResponse({ __type: "InternalServerError", message: "retry" }, 500); }
+      return {};
+    });
+    const client = new AlternatorDynamoDBClient({
+      seeds: ["seed"], requestHandler: handler, discovery: { background: false },
+      routing: routing.rack({ datacenter: "dc1", rack: "rack-a" }), maxAttempts: 2,
+      keyRouteAffinity: { mode: "any-write", partitionKeys: { users: "id" } },
+    });
+    try {
+      await client.alternator.refreshNodes();
+      await client.send(new BatchWriteItemCommand({ RequestItems: { users: [
+        { PutRequest: { Item: { id: { S: key } } } },
+        { DeleteRequest: { Key: { id: { S: key } } } },
+      ] } }));
+      failNext = true;
+      await client.send(new PutItemCommand({ TableName: "users", Item: { id: { S: key } } }));
+      expect(commandRequests(handler).map((request) => request.hostname)).toEqual(["rack-other", "rack-other", "rack-local"]);
+    } finally { client.destroy(); }
+  });
+
+  it("deduplicates widened operations and reuses empty ordinary results within each refresh", async () => {
+    let rackAvailable = true;
+    let preferredAvailable = false;
+    const handler = new RecordingHandler((request) => {
+      if (request.path !== "/localnodes") { return {}; }
+      if (request.query.dc === missingDatacenter || request.query.rack === missingRack) { return []; }
+      if (request.query.rack) { return rackAvailable ? ["seed"] : []; }
+      if (request.query.dc === "A") { return preferredAvailable ? ["preferred"] : []; }
+      return ["seed"];
+    });
+    const client = new AlternatorDynamoDBClient({
+      seeds: ["seed"], requestHandler: handler, discovery: { background: false },
+      routing: routing.rack({ datacenter: "A", rack: "r1", fallback: routing.rack({
+        datacenter: "A", rack: "r1", fallback: routing.datacenter({
+          datacenter: "A", fallback: routing.datacenter({ datacenter: "B" }),
+        }),
+      }) }),
+      keyRouteAffinity: { mode: "any-write", partitionKeys: { users: "id" } },
+    });
+    try {
+      for (const [rack, preferred] of [[true, false], [false, false], [false, true]] as const) {
+        rackAvailable = rack;
+        preferredAvailable = preferred;
+        handler.requests.length = 0;
+        await client.alternator.refreshNodes();
+        const dcQueries = handler.requests.filter((request) => request.path === "/localnodes" &&
+          request.query.rack === undefined && request.query.dc !== missingDatacenter)
+          .map((request) => request.query.dc);
+        expect(dcQueries).toEqual(preferred ? ["A"] : ["A", "B"]);
+        await client.send(new PutItemCommand({ TableName: "users", Item: { id: { S: "same" } } }));
+        expect(commandRequests(handler).at(-1)?.hostname).toBe(preferred ? "preferred" : "seed");
+      }
+    } finally { client.destroy(); }
+  });
+
+  it("retains both snapshots without an auxiliary pass when ordinary discovery exhausts", async () => {
+    let phase: "ready" | "empty" | "failed" = "ready";
+    const handler = new RecordingHandler((request) => {
+      if (request.path !== "/localnodes") { return {}; }
+      if (request.query.dc === missingDatacenter || request.query.rack === missingRack) { return []; }
+      if (request.query.rack) {
+        if (phase === "failed") { throw new Error("ordinary discovery unavailable"); }
+        return phase === "empty" ? [] : ["rack-local"];
+      }
+      return phase === "ready" ? ["dc-ready"] : ["unexpected-new"];
+    });
+    const client = new AlternatorDynamoDBClient({
+      seeds: ["seed"], requestHandler: handler, discovery: { background: false },
+      routing: routing.rack({ datacenter: "dc1", rack: "rack-a" }),
+      keyRouteAffinity: { mode: "any-write", partitionKeys: { users: "id" } },
+    });
+    try {
+      await client.alternator.refreshNodes();
+      for (const value of ["empty", "failed"] as const) {
+        phase = value;
+        handler.requests.length = 0;
+        await client.alternator.refreshNodes();
+        expect(client.alternator.nodes().map((node) => node.host)).toEqual(["rack-local"]);
+        expect(handler.requests.filter((request) => request.query.dc === "dc1" &&
+          request.query.rack === undefined)).toHaveLength(0);
+        await client.send(new PutItemCommand({ TableName: "users", Item: { id: { S: "same" } } }));
+        expect(commandRequests(handler).at(-1)?.hostname).toBe("dc-ready");
+      }
+    } finally { client.destroy(); }
+  });
+
+  it.each(["single", "batch"] as const)("keeps captured %s affinity order after topology changes and plan exhaustion", async (kind) => {
+    const oldHosts = ["old-a", "old-b"];
+    const oldNodes = testNodes(oldHosts, 8080);
+    const key = partitionKeyValuesForNode(oldNodes, nodeByHost(oldNodes, "old-b"), "capture", 1)[0]!;
+    let changed = false;
+    let attempts = 0;
+    const handler = new RecordingHandler(async (request) => {
+      if (request.path === "/localnodes") {
+        if (request.query.dc === missingDatacenter || request.query.rack === missingRack) { return []; }
+        return request.query.rack ? [changed ? "new-a" : "old-a"] : changed ? ["new-a", "new-b"] : oldHosts;
+      }
+      attempts += 1;
+      if (attempts === 1) {
+        changed = true;
+        await client.alternator.refreshNodes();
+      }
+      return attempts <= 2 ? jsonResponse({ __type: "InternalServerError", message: "retry" }, 500) : {};
+    });
+    const client = new AlternatorDynamoDBClient({
+      seeds: ["seed"], requestHandler: handler, discovery: { background: false }, maxAttempts: 3,
+      routing: routing.rack({ datacenter: "dc1", rack: "rack-a" }),
+      keyRouteAffinity: { mode: "any-write", partitionKeys: { users: "id" } },
+    });
+    const send = () => kind === "single"
+      ? client.send(new PutItemCommand({ TableName: "users", Item: { id: { S: key } } }))
+      : client.send(new BatchWriteItemCommand({ RequestItems: { users: [
+        { PutRequest: { Item: { id: { S: key } } } },
+      ] } }));
+    try {
+      await client.alternator.refreshNodes();
+      await send();
+      expect(commandRequests(handler).map((request) => request.hostname)).toEqual(["old-b", "old-a", "old-b"]);
+      await send();
+      expect(["new-a", "new-b"]).toContain(commandRequests(handler).at(-1)?.hostname);
+    } finally { client.destroy(); }
+  });
+
+  it("keeps ordinary retry exhaustion on the updated ordinary membership", async () => {
+    let changed = false;
+    let attempts = 0;
+    const handler = new RecordingHandler(async (request) => {
+      if (request.path === "/localnodes") {
+        if (request.query.dc === missingDatacenter || request.query.rack === missingRack) { return []; }
+        return [changed ? "new-local" : "old-local"];
+      }
+      attempts += 1;
+      if (attempts === 1) {
+        changed = true;
+        await client.alternator.refreshNodes();
+        return jsonResponse({ __type: "InternalServerError", message: "retry" }, 500);
+      }
+      return {};
+    });
+    const client = new AlternatorDynamoDBClient({
+      seeds: ["seed"], requestHandler: handler, discovery: { background: false }, maxAttempts: 2,
+      routing: routing.rack({ datacenter: "dc1", rack: "rack-a" }),
+      keyRouteAffinity: { mode: "any-write", partitionKeys: { users: "id" } },
+    });
+    try {
+      await client.alternator.refreshNodes();
+      await client.send(new GetItemCommand({ TableName: "users", Key: { id: { S: "same" } } }));
+      expect(commandRequests(handler).map((request) => request.hostname)).toEqual(["old-local", "new-local"]);
+    } finally { client.destroy(); }
   });
 
   it("uses BatchWrite voting to pick a preferred node", async () => {
