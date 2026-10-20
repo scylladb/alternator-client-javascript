@@ -50,9 +50,10 @@ installs it in an isolated temporary project, and checks runtime exports and
 TypeScript declarations.
 `make test-all` installs the repository-pinned `scylla-ccm`, provisions a
 native three-node Scylla cluster, runs the integration suite, and removes the
-cluster. The default cluster uses Scylla `release:2025.2.5`, one datacenter and
-rack, HTTP and HTTPS, two processing units and 1,024 MiB per node, and disabled
-authentication and authorization.
+cluster. The default specification uses Scylla `release:2025.2.5`, one datacenter
+and one rack, HTTP and HTTPS, two processing units and 1,024 MiB per node, and
+disabled authentication and authorization. The integration suite explicitly
+overrides the topology to three racks with one node each for affinity coverage.
 
 The CCM harness accepts these environment overrides:
 
@@ -76,6 +77,13 @@ cluster, set `ALTERNATOR_USE_EXISTING=true` together with `INTEGRATION_TESTS`,
 run `npm run test:integration:suite`. An optional `ALTERNATOR_RESOURCE_PREFIX`
 must contain at most 222 ASCII letters, digits, underscores, hyphens, or periods;
 an empty CA path is treated as absent.
+
+For the cross-rack affinity case, also set `ALTERNATOR_SECOND_RACK_HOST` and
+`ALTERNATOR_SECOND_RACK` to a node and rack in the same datacenter as
+`ALTERNATOR_HOST`, but in a different rack. This case is skipped when either
+second-rack variable is absent. Each of these two tested racks must contain
+only its named node, and both nodes must serve the shared `ALTERNATOR_PORT`
+and `ALTERNATOR_HTTPS_PORT` ports.
 
 ## Making changes
 
