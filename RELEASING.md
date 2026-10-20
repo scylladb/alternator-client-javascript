@@ -85,14 +85,19 @@ validated.
 Create a signed annotated tag for the validated commit and push only that tag:
 
 ```sh
-git tag -s "$release_tag" "$release_sha" -m "@scylladb/alternator-client ${release_tag}"
+export RELEASE_GPG_PRIVATE_KEY_FILE=/private/path/signing-private.asc
+export RELEASE_GPG_PASSPHRASE_FILE=/private/path/passphrase.txt
+python3 scripts/release/signing.py exec git tag -s "$release_tag" "$release_sha" \
+  -m "@scylladb/alternator-client ${release_tag}"
+python3 scripts/release/signing.py verify-tag "$release_tag"
 git push origin "refs/tags/${release_tag}"
 ```
 
 The tag-triggered workflow rejects the release unless all of these invariants
 hold:
 
-- the tag is exactly `v${package.version}`;
+- the tag is exactly `v${package.version}` and its signature matches the repository's
+  pinned signing subkey (see [release signing](scripts/release/SIGNING.md));
 - the tagged commit is contained in `origin/main`;
 - `release-notes/v<version>.md` exists;
 - if the npm version is unpublished, publishing it creates or advances the npm
@@ -113,7 +118,8 @@ Watch the tag-triggered `Release package` workflow through completion. It must:
 3. publish that tarball to npm with provenance;
 4. wait until npm reports matching artifact integrity;
 5. install the exact registry version and repeat the package smoke test;
-6. create the GitHub Release from `release-notes/v<version>.md`.
+6. create the GitHub Release from `release-notes/v<version>.md`, attaching the
+   exact npm tarball and its detached `.asc` signature.
 
 After the workflow succeeds, verify the public state:
 
@@ -124,7 +130,8 @@ npm view "@scylladb/alternator-client@${release_version}" version dist.integrity
 
 Confirm npm displays the README, Apache-2.0 license, provenance, and the expected
 `latest` or `next` dist-tag. Confirm the `v<version>` GitHub Release exists and
-points to the validated commit.
+points to the validated commit. Verify the tarball signature using the public
+certificate and fingerprints in `scripts/release/SIGNING.md`.
 
 ## Recovery
 
