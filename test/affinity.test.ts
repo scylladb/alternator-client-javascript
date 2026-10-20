@@ -247,7 +247,10 @@ describe("key route affinity", () => {
           request.query.rack === undefined && request.query.dc !== missingDatacenter).map((request) => request.query.dc);
         // A usable earlier DC must win even after ordinary routing selected cluster.
         if (phase === "preferred") { expect(affinityQueries).toEqual([undefined, "A"]); }
-        if (phase === "secondary") { expect(affinityQueries.indexOf("A")).toBeLessThan(affinityQueries.indexOf("B")); }
+        if (phase === "secondary") {
+          expect(affinityQueries).toContain("A");
+          expect(affinityQueries.indexOf("A")).toBeLessThan(affinityQueries.indexOf("B"));
+        }
         await send();
         expect(commandRequests(handler).at(-1)?.hostname).toBe(`${value === "preferred" ? "preferred" : value === "secondary" ? "secondary" : "cluster"}-node`);
       }

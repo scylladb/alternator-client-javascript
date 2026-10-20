@@ -415,7 +415,8 @@ tables can still vote.
 Per request, the client creates a lazy node query plan. When the AWS retry
 strategy retries a transport failure or retryable service response, the next
 attempt consumes the next node from that plan. Active nodes are tried without
-repeating until the plan is exhausted; additional attempts start another plan.
+repeating until the plan is exhausted. Additional ordinary attempts start
+another plan; eligible affinity attempts cycle through their captured order.
 
 The client does not maintain a persistent dead-node quarantine, subscribe to
 topology events, or health-rank nodes across requests. A failed node can be

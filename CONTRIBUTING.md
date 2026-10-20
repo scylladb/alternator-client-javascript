@@ -81,7 +81,9 @@ an empty CA path is treated as absent.
 For the cross-rack affinity case, also set `ALTERNATOR_SECOND_RACK_HOST` and
 `ALTERNATOR_SECOND_RACK` to a node and rack in the same datacenter as
 `ALTERNATOR_HOST`, but in a different rack. This case is skipped when either
-second-rack variable is absent.
+second-rack variable is absent. Each of these two tested racks must contain
+only its named node, and both nodes must serve the shared `ALTERNATOR_PORT`
+and `ALTERNATOR_HTTPS_PORT` ports.
 
 ## Making changes
 

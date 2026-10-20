@@ -263,7 +263,7 @@ describeIntegration.each(integrationEndpoints())(
         expect(secondCaptured[0]?.request.hostname).toBe(secondRackHost);
       } finally {
         try {
-          await safeDeleteTable(tableClient, tableName);
+          await safeDeleteTable(tableClient, tableName, { abortSignal: AbortSignal.timeout(10_000) });
         } finally {
           firstRackClient.destroy();
           secondRackClient.destroy();

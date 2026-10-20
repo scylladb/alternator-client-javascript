@@ -28,7 +28,7 @@ import {
   type ServiceOutputTypes,
 } from "@aws-sdk/client-dynamodb";
 import { HttpRequest } from "@smithy/protocol-http";
-import type { FinalizeRequestMiddleware } from "@smithy/types";
+import type { FinalizeRequestMiddleware, HttpHandlerOptions } from "@smithy/types";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import type { AlternatorNodeDynamoDBClientConfig } from "../../src/index.js";
@@ -162,9 +162,13 @@ export async function createStringHashTable(
   );
 }
 
-export async function safeDeleteTable(client: DynamoDBClient, tableName: string): Promise<void> {
+export async function safeDeleteTable(
+  client: DynamoDBClient,
+  tableName: string,
+  options?: HttpHandlerOptions,
+): Promise<void> {
   try {
-    await client.send(new DeleteTableCommand({ TableName: tableName }));
+    await client.send(new DeleteTableCommand({ TableName: tableName }), options);
   } catch (error) {
     if (!isResourceNotFound(error)) {
       throw error;
