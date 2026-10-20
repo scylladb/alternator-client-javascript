@@ -29,6 +29,13 @@ ported.
 | HTTPS operation with trust-all behavior, optional custom CA, and custom-CA CRUD | `TlsConfigIT`, HTTPS cases in HTTP-client implementation IT files | `test/integration-test/tls-config.test.ts` |
 | TLS session-cache enabled/disabled behavior with real HTTPS requests | `TlsSessionResumptionIT` | `test/integration-test/tls-session-resumption.test.ts` |
 
+## Additional Epic Coverage
+
+`test/integration-test/key-route-affinity-autodiscovery.test.ts` also covers
+DRIVER-1147: key-route affinity overrides rack-local routing for qualifying
+writes while ordinary writes remain local. This supplements the Java parity
+coverage above; it is not attributed to a Java test.
+
 ## Existing JS Unit Coverage
 
 These Java unit-test areas already had JavaScript unit coverage and were not duplicated as new
