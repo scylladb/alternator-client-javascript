@@ -355,6 +355,7 @@ jobs:
 
       - name: Sign and verify exact npm tarball
         env:
+          RELEASE_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
           RELEASE_ARTIFACT: ${{ steps.pack.outputs.artifact }}
         run: python3 scripts/release/signing.py sign-files "$RELEASE_ARTIFACT"
 
