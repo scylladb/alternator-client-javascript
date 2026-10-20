@@ -6,6 +6,17 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Key-route affinity spans racks in the configured datacenter while retaining
+  the full explicit fallback chain and ordinary request routing. Equivalent
+  discovery operations share refresh-local results, and captured affinity retry
+  plans remain stable across topology updates and exhaustion. Ordinary discovery
+  failures retain stale views without an additional affinity pass. Edge commands
+  resume after ordinary discovery and can refresh ordinary membership while
+  distinct affinity discovery continues. Background refresh intervals do not
+  accumulate waiters while affinity discovery is pending.
+
 ### Changed
 
 - Replaced Docker Compose integration-test provisioning with a repository-pinned
