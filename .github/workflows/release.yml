@@ -81,6 +81,10 @@ jobs:
           echo "tag=$release_tag" >> "$GITHUB_OUTPUT"
           echo "dist_tag=$dist_tag" >> "$GITHUB_OUTPUT"
 
+      - name: Verify repository signing subkey on release tag
+        if: github.ref_type == 'tag'
+        run: python3 scripts/release/signing.py verify-tag "$GITHUB_REF_NAME"
+
       - name: Set up npm
         run: npm install --global "npm@${NPM_VERSION}"
 
@@ -246,6 +250,10 @@ jobs:
           echo "notes=$release_notes" >> "$GITHUB_OUTPUT"
           echo "dist_tag=$dist_tag" >> "$GITHUB_OUTPUT"
 
+      - name: Verify repository signing subkey on release tag
+        if: github.ref_type == 'tag'
+        run: python3 scripts/release/signing.py verify-tag "$GITHUB_REF_NAME"
+
       - name: Set up npm
         run: npm install --global "npm@${NPM_VERSION}"
 
@@ -339,6 +347,17 @@ jobs:
           PACKAGE_VERSION: ${{ steps.package.outputs.version }}
         run: node scripts/check-registry-state.mjs
 
+      - name: Configure protected repository signing subkey
+        env:
+          RELEASE_GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          RELEASE_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: python3 scripts/release/signing.py configure
+
+      - name: Sign and verify exact npm tarball
+        env:
+          RELEASE_ARTIFACT: ${{ steps.pack.outputs.artifact }}
+        run: python3 scripts/release/signing.py sign-files "$RELEASE_ARTIFACT"
+
       - name: Publish exact release artifact
         if: steps.registry.outputs.publish_needed == 'true'
         shell: bash
@@ -402,6 +421,7 @@ jobs:
           PACKAGE_VERSION: ${{ steps.package.outputs.version }}
           RELEASE_NOTES: ${{ steps.package.outputs.notes }}
           RELEASE_TAG: ${{ steps.package.outputs.tag }}
+          RELEASE_ARTIFACT: ${{ steps.pack.outputs.artifact }}
         run: |
           args=(
             "$RELEASE_TAG"
@@ -414,11 +434,21 @@ jobs:
           fi
 
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            existing="$RUNNER_TEMP/existing-release-assets"
+            mkdir -m 700 "$existing"
+            gh release download "$RELEASE_TAG" --dir "$existing"
+            cmp "$RELEASE_ARTIFACT" "$existing/$(basename "$RELEASE_ARTIFACT")"
+            cp "$existing/$(basename "$RELEASE_ARTIFACT").asc" "$RELEASE_ARTIFACT.asc"
+            python3 scripts/release/signing.py sign-files "$RELEASE_ARTIFACT"
             args+=(--draft=false)
             if [[ "$PACKAGE_VERSION" != *-* ]]; then
               args+=(--prerelease=false)
             fi
             gh release edit "${args[@]}"
           else
-            gh release create "${args[@]}"
+            gh release create "${args[@]}" "$RELEASE_ARTIFACT" "$RELEASE_ARTIFACT.asc"
           fi
+
+      - name: Remove temporary release signing files
+        if: always() && env.RELEASE_SIGNING_DIR != ''
+        run: python3 scripts/release/signing.py cleanup
