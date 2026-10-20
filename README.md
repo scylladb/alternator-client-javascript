@@ -449,9 +449,11 @@ make test-integration
 `make test-all` is an alias for the CCM-backed integration suite. The harness
 owns provisioning, endpoint readiness, generated TLS material, per-lease table
 namespaces, diagnostics, and cleanup. The default specification uses three
-nodes in one datacenter and rack, HTTP and HTTPS, two processing units and
-1,024 MiB per node, disabled authentication and authorization, and Scylla
+nodes in one datacenter and one rack, HTTP and HTTPS, two processing units
+and 1,024 MiB per node, disabled authentication and authorization, and Scylla
 `release:2025.2.5`.
+The integration suite explicitly overrides this topology to use three racks
+with one node each for affinity coverage.
 
 Set `SCYLLA_VERSION` to select another Scylla package or `SCYLLA_CCM_PATH` to
 use another CCM executable. `SCYLLA_CCM_MAX_NODES` may lower the nine-node
