@@ -84,6 +84,9 @@ jobs:
       - name: Set up npm
         run: npm install --global "npm@${NPM_VERSION}"
 
+      - name: Test release note automation
+        run: node --test scripts/github-release-notes.test.mjs
+
       - name: Install dependencies
         run: npm ci
 
@@ -249,6 +252,9 @@ jobs:
       - name: Set up npm
         run: npm install --global "npm@${NPM_VERSION}"
 
+      - name: Test release note automation
+        run: node --test scripts/github-release-notes.test.mjs
+
       - name: Install dependencies
         run: npm ci
 
@@ -402,23 +408,4 @@ jobs:
           PACKAGE_VERSION: ${{ steps.package.outputs.version }}
           RELEASE_NOTES: ${{ steps.package.outputs.notes }}
           RELEASE_TAG: ${{ steps.package.outputs.tag }}
-        run: |
-          args=(
-            "$RELEASE_TAG"
-            --verify-tag
-            --title "$RELEASE_TAG"
-            --notes-file "$RELEASE_NOTES"
-          )
-          if [[ "$PACKAGE_VERSION" == *-* ]]; then
-            args+=(--prerelease)
-          fi
-
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            args+=(--draft=false)
-            if [[ "$PACKAGE_VERSION" != *-* ]]; then
-              args+=(--prerelease=false)
-            fi
-            gh release edit "${args[@]}"
-          else
-            gh release create "${args[@]}"
-          fi
+        run: node scripts/github-release-notes.mjs release

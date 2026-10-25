@@ -113,7 +113,9 @@ Watch the tag-triggered `Release package` workflow through completion. It must:
 3. publish that tarball to npm with provenance;
 4. wait until npm reports matching artifact integrity;
 5. install the exact registry version and repeat the package smoke test;
-6. create the GitHub Release from `release-notes/v<version>.md`.
+6. create the GitHub Release, or publish a matching draft, with curated
+   `release-notes/v<version>.md` followed by filtered GitHub generated notes.
+   A rerun leaves an already published release and its notes unchanged.
 
 After the workflow succeeds, verify the public state:
 
@@ -175,3 +177,18 @@ and file-snapshot output, and inspect the actual PR labels and changed paths.
 Confirm support-only changes carry the omission label and runtime, build and mixed
 changes do not. On a failed run or changed PR evidence, rerun classification and
 repeat inspection before tagging. Review curated notes separately.
+
+Release publication remains asynchronous; there is no automated classification
+barrier. Missed manual verification can leave omissions or unwanted support entries
+in published notes. Published releases are not synchronized automatically. Generated
+notes use `.github/release.yml` to
+exclude labeled PRs; labels alone do not edit the curated notes. Keep curated
+notes focused on release guidance and user-facing changes, and remove any
+support-only PR references from that hand-maintained text during release review.
+New releases and matching drafts receive the curated file and generated section.
+Matching-draft recovery inspects every release-list page. Reruns preserve already
+published notes, including any earlier classification mistake. No exclusion
+is based solely on author, PR title, or broad dependency/housekeeping labels.
+
+Run the focused automation tests with `node --test scripts/github-release-notes.test.mjs`
+and `npm ci --ignore-scripts --prefix .github && node --test .github/tests/release-notes-guard.test.cjs`.
