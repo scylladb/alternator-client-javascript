@@ -3,4 +3,4 @@
 omit-from-release-notes:
   - changed-files:
       - all-globs-to-all-files:
-          - "{test/**,feature-specs/**,docs/**,release-notes/**,.github/{labeler.yml,release.yml,workflows/ci.yml,workflows/label-release-notes.yml,scripts/release-notes-guard.cjs,tests/release-notes-guard.test.cjs,package.json,package-lock.json},README.md,CHANGELOG.md,CONTRIBUTING.md,RELEASING.md,SECURITY.md,vitest.config.ts,vitest.integration.config.ts,eslint.config.js,.gitignore,scripts/test-package.mjs,scripts/run-integration.mjs,scripts/install-ccm.mjs,scripts/github-release-notes.mjs,scripts/github-release-notes.test.mjs,scripts/check-dist-tag.test.mjs}"
+          - "{test/**,feature-specs/**,docs/**,release-notes/**,.github/{labeler.yml,release.yml,workflows/ci.yml,workflows/label-release-notes.yml,scripts/release-notes-guard.cjs,tests/release-notes-guard.test.cjs,package.json,package-lock.json},README.md,CHANGELOG.md,CONTRIBUTING.md,RELEASING.md,SECURITY.md,vitest.config.ts,vitest.integration.config.ts,eslint.config.js,.gitignore,scripts/run-integration.mjs,scripts/install-ccm.mjs,scripts/github-release-notes.test.mjs,scripts/check-dist-tag.test.mjs}"

@@ -98,12 +98,14 @@ test('canonical policy matches mixed support files and keeps runtime or unknown 
     '.github/workflows/label-release-notes.yml', '.github/scripts/release-notes-guard.cjs',
     '.github/tests/release-notes-guard.test.cjs', '.github/package.json', '.github/package-lock.json',
     'README.md', 'test/config.test.ts', 'test/scylla/scylla.yaml', 'docs/guide.md',
-    'feature-specs/client.md', 'release-notes/v1.0.0.md', 'scripts/test-package.mjs',
-    'scripts/github-release-notes.mjs', 'vitest.config.ts', '.gitignore'].map(name => file(name));
+    'feature-specs/client.md', 'release-notes/v1.0.0.md', 'vitest.config.ts', '.gitignore'].map(name => file(name));
   assert.equal((await guard.snapshot(fixture({files}).github, repo, 20)).omit, true);
   for (const name of ['src/client.ts', 'package.json', 'package-lock.json', 'tsup.config.ts',
     'Makefile', 'LICENSE', '.github/workflows/release.yml', '.github/workflows/new.yml',
-    '.github/unknown', 'scripts/check-registry-state.mjs', 'unknown.txt']) {
+    '.github/unknown', 'scripts/check-registry-state.mjs', 'scripts/github-release-notes.mjs',
+    'scripts/test-package.mjs', 'unknown.txt']) {
+    const alone = await guard.snapshot(fixture({files: [file(name)]}).github, repo, 20);
+    assert.equal(alone.omit, false, name);
     const current = await guard.snapshot(fixture({files: [...files, file(name)]}).github, repo, 20);
     assert.equal(current.omit, false, name);
   }
