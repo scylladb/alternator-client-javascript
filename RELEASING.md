@@ -113,7 +113,9 @@ Watch the tag-triggered `Release package` workflow through completion. It must:
 3. publish that tarball to npm with provenance;
 4. wait until npm reports matching artifact integrity;
 5. install the exact registry version and repeat the package smoke test;
-6. create the GitHub Release from `release-notes/v<version>.md`.
+6. create the GitHub Release, or publish a matching draft, with curated
+   `release-notes/v<version>.md` followed by filtered GitHub generated notes.
+   A rerun leaves an already published release and its notes unchanged.
 
 After the workflow succeeds, verify the public state:
 
@@ -141,3 +143,52 @@ repeats registry verification, and creates the GitHub Release if it is missing.
 If npm contains the release version with different integrity, stop the release.
 Investigate the discrepancy and prepare a new patch version; npm versions are
 immutable.
+
+## Release note classification
+
+The `Classify release notes` workflow uses `actions/labeler` with the filename
+rules in `.github/labeler.yml` to manage `omit-from-release-notes`. Every changed
+filename, including a rename's previous filename, must match the union of
+documentation, tests, explicitly listed CI configuration and development helpers.
+Production code, root dependency manifests, build/packaging inputs, production
+release workflows and unknown paths remain visible. The explicitly listed private
+automation manifests under `.github/` are eligible. README and other listed
+documentation qualify even when included in the npm package.
+
+`sync-labels: true` removes the label when changed filenames stop matching.
+The workflow runs on PR opens, updates, edits, reopens, and closes, including
+merges. A guard validates complete file metadata and compares the PR revisions and
+file listing before and after classification. It also verifies the actual omission
+label, including its case-insensitive logical name. Production-origin renames skip
+the action and remove the omission label. Failed or unexpectedly skipped
+classification attempts omission-label cleanup and leaves a visible workflow
+failure. Cleanup is best effort: API outages can prevent it, and before/after reads
+do not make classification atomic or race-free.
+
+The workflow confirms the target is a pull request before checking out trusted
+workflow code or installing its isolated dependencies. An ordinary issue or an
+unconfirmed target receives no label writes. Once confirmed, a PR retains cleanup
+after later setup or API failures. Run manual dispatch on the default branch.
+
+Before pushing a release tag, identify the merged PRs included since the previous
+release. For each PR, run `Classify release notes` from the Actions UI on the default
+branch with its PR number. Wait for a successful run, check its verified revision
+and file-snapshot output, and inspect the actual PR labels and changed paths.
+Confirm support-only changes carry the omission label and runtime, build and mixed
+changes do not. On a failed run or changed PR evidence, rerun classification and
+repeat inspection before tagging. Review curated notes separately.
+
+Release publication remains asynchronous; there is no automated classification
+barrier. Missed manual verification can leave omissions or unwanted support entries
+in published notes. Published releases are not synchronized automatically. Generated
+notes use `.github/release.yml` to
+exclude labeled PRs; labels alone do not edit the curated notes. Keep curated
+notes focused on release guidance and user-facing changes, and remove any
+support-only PR references from that hand-maintained text during release review.
+New releases and matching drafts receive the curated file and generated section.
+Matching-draft recovery inspects every release-list page. Reruns preserve already
+published notes, including any earlier classification mistake. No exclusion
+is based solely on author, PR title, or broad dependency/housekeeping labels.
+
+Run the focused automation tests with `node --test scripts/github-release-notes.test.mjs`
+and `npm ci --ignore-scripts --prefix .github && node --test .github/tests/release-notes-guard.test.cjs`.
