@@ -68,6 +68,21 @@ afterEach(async () => {
   );
 });
 
+describe("process liveness fixture", () => {
+  it.each(["ENOENT", "ESRCH"])("treats %s as a stopped process", async (code) => {
+    const readStat = vi.fn().mockRejectedValue(Object.assign(new Error(code), { code }));
+
+    await expect(isLiveProcess(123, readStat)).resolves.toBe(false);
+    expect(readStat).toHaveBeenCalledWith("/proc/123/stat");
+  });
+
+  it("propagates unrelated process-status read errors", async () => {
+    const error = Object.assign(new Error("permission denied"), { code: "EPERM" });
+
+    await expect(isLiveProcess(123, vi.fn().mockRejectedValue(error))).rejects.toBe(error);
+  });
+});
+
 describeLinux("CCM-REQ-002 native command provisioning", () => {
   it("rejects diagnostics paths that overlap the harness state root", async () => {
     const root = await createTemporaryDirectory("diagnostics-state");
@@ -1090,20 +1105,26 @@ function fixtureProcessIds(records: readonly unknown[]): number[] {
 async function waitForProcessesToStop(pids: readonly number[]): Promise<void> {
   const deadline = Date.now() + 2_000;
   while (Date.now() < deadline) {
-    if ((await Promise.all(pids.map(isLiveProcess))).every((live) => !live)) {
+    if ((await Promise.all(pids.map((pid) => isLiveProcess(pid)))).every((live) => !live)) {
       return;
     }
     await delay(20);
   }
 }
 
-async function isLiveProcess(pid: number): Promise<boolean> {
+async function isLiveProcess(
+  pid: number,
+  readStat: (path: string) => Promise<string> = (path) => readFile(path, "utf8"),
+): Promise<boolean> {
   try {
-    const contents = await readFile(`/proc/${pid}/stat`, "utf8");
+    const contents = await readStat(`/proc/${pid}/stat`);
     const closing = contents.lastIndexOf(")");
     return closing < 0 || contents[closing + 2] !== "Z";
   } catch (error) {
-    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+    if (
+      error instanceof Error && "code" in error &&
+      (error.code === "ENOENT" || error.code === "ESRCH")
+    ) {
       return false;
     }
     throw error;
