@@ -160,6 +160,7 @@ jobs:
     name: Publish npm package
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    environment: npm-publish
     concurrency:
       group: npm-publish-${{ github.repository }}
       cancel-in-progress: false
