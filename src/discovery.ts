@@ -39,6 +39,11 @@ interface InFlightRefresh {
   readonly deadlines: DiscoveryDeadlineContext;
 }
 
+interface InFlightAffinity {
+  readonly promise: Promise<void>;
+  readonly deadlines: DiscoveryDeadlineContext;
+}
+
 interface ActiveDiscoveryRequest {
   readonly abortController: AbortController;
   readonly cancellation: Promise<never>;
@@ -48,9 +53,12 @@ interface ActiveDiscoveryRequest {
 
 export class AlternatorDiscovery {
   private liveHosts: string[];
+  private keyRouteAffinityHosts: string[] | undefined;
+  private readonly affinityScopes: readonly AlternatorRoutingScope[] | undefined;
   private refreshTimer: ReturnType<typeof setInterval> | undefined;
   private lastRefreshAttempt = 0;
   private inFlightRefresh: InFlightRefresh | undefined;
+  private inFlightAffinity: InFlightAffinity | undefined;
   private readonly activeDeadlines = new Set<ReturnType<typeof setTimeout>>();
   private readonly activeRequests = new Set<ActiveDiscoveryRequest>();
   private destroyed = false;
@@ -61,9 +69,23 @@ export class AlternatorDiscovery {
     private readonly forwardRequestTimeoutToHandler: boolean,
   ) {
     this.liveHosts = [...config.seeds];
+    const scopes = routingChain(config.routing);
+    if (config.keyRouteAffinity.enabled && scopes.some((scope) => scope.kind === "rack")) {
+      const operations = new Set<string>();
+      this.affinityScopes = scopes.map<AlternatorRoutingScope>((scope) => scope.kind === "rack"
+        ? { kind: "datacenter", datacenter: scope.datacenter }
+        : scope).filter((scope) => {
+        const operation = discoveryOperationKey(scope);
+        if (operations.has(operation)) {
+          return false;
+        }
+        operations.add(operation);
+        return true;
+      });
+    }
     if (config.runtime === "node" && config.discovery.background && config.discovery.refreshIntervalMs > 0) {
       this.refreshTimer = setInterval(() => {
-        this.startRefresh(false).catch(() => undefined);
+        this.startRefresh(false, false).catch(() => undefined);
       }, config.discovery.refreshIntervalMs);
       this.refreshTimer.unref?.();
     }
@@ -71,6 +93,10 @@ export class AlternatorDiscovery {
 
   getLiveNodes(): AlternatorNode[] {
     return this.liveHosts.map((host) => this.toNode(host));
+  }
+
+  getKeyRouteAffinityNodes(): AlternatorNode[] {
+    return (this.keyRouteAffinityHosts ?? this.liveHosts).map((host) => this.toNode(host));
   }
 
   createQueryPlan(preferredNode?: AlternatorNode): AlternatorQueryPlan {
@@ -81,24 +107,28 @@ export class AlternatorDiscovery {
     return this.startRefresh(true);
   }
 
-  private async startRefresh(referenced: boolean): Promise<AlternatorNode[]> {
-    if (this.inFlightRefresh) {
-      if (referenced && !this.destroyed) {
-        referenceDiscoveryDeadlines(this.inFlightRefresh.deadlines);
-      }
-      return this.inFlightRefresh.promise;
+  private async startRefresh(referenced: boolean, waitForAffinity = true): Promise<AlternatorNode[]> {
+    if (!this.inFlightRefresh) {
+      this.lastRefreshAttempt = Date.now();
+      const deadlines: DiscoveryDeadlineContext = { referenced, timers: new Set() };
+      const promise = this.refreshLiveNodesOnce(deadlines).finally(() => {
+        this.inFlightRefresh = undefined;
+      });
+      this.inFlightRefresh = { promise, deadlines };
     }
-
-    this.lastRefreshAttempt = Date.now();
-    const deadlines: DiscoveryDeadlineContext = {
-      referenced,
-      timers: new Set(),
-    };
-    const promise = this.refreshLiveNodesOnce(deadlines).finally(() => {
-      this.inFlightRefresh = undefined;
-    });
-    this.inFlightRefresh = { promise, deadlines };
-    return promise;
+    const refresh = this.inFlightRefresh;
+    if (referenced && !this.destroyed) {
+      referenceDiscoveryDeadlines(refresh.deadlines);
+      if (this.inFlightAffinity) {
+        referenceDiscoveryDeadlines(this.inFlightAffinity.deadlines);
+      }
+    }
+    const nodes = await refresh.promise;
+    if (waitForAffinity) {
+      await this.inFlightAffinity?.promise;
+      return this.getLiveNodes();
+    }
+    return nodes;
   }
 
   async refreshIfDue(): Promise<void> {
@@ -109,7 +139,7 @@ export class AlternatorDiscovery {
     if (interval <= 0 || Date.now() - this.lastRefreshAttempt < interval) {
       return;
     }
-    await this.refreshLiveNodes();
+    await this.startRefresh(true, false);
   }
 
   async checkRackDatacenterSupport(): Promise<boolean> {
@@ -194,13 +224,11 @@ export class AlternatorDiscovery {
     const candidates = this.candidateHosts();
     let datacenterSupport: RackDatacenterSupport | undefined;
     let rackSupport: RackDatacenterSupport | undefined;
+    const results = new Map<string, string[]>();
 
     for (const scope of routingChain(this.config.routing)) {
       try {
-        let nodes: string[];
-        if (scope.kind === "cluster") {
-          nodes = await this.fetchClusterLocalNodes(deadlines);
-        } else {
+        if (scope.kind !== "cluster") {
           datacenterSupport ??= await this.probeRackDatacenterSupport("datacenter", deadlines);
           if (datacenterSupport === "unsupported") {
             this.config.logger.debug?.("alternator discovery: datacenter query parameters are unsupported", {
@@ -217,10 +245,14 @@ export class AlternatorDiscovery {
               continue;
             }
           }
-          nodes = await this.fetchFirstAvailableLocalNodes(queryForRoutingScope(scope), candidates, deadlines);
+        }
+        const nodes = await this.fetchNodesForScope(scope, deadlines, candidates);
+        if (this.affinityScopes) {
+          results.set(discoveryOperationKey(scope), nodes);
         }
         if (nodes.length > 0) {
           this.liveHosts = normalizeDiscoveredHosts(nodes);
+          this.refreshKeyRouteAffinityHosts(deadlines, datacenterSupport, results);
           return this.getLiveNodes();
         }
       } catch (error) {
@@ -232,6 +264,61 @@ export class AlternatorDiscovery {
     }
 
     return this.getLiveNodes();
+  }
+
+  private refreshKeyRouteAffinityHosts(
+    deadlines: DiscoveryDeadlineContext,
+    datacenterSupport: RackDatacenterSupport | undefined,
+    results: ReadonlyMap<string, string[]>,
+  ): void {
+    if (this.inFlightAffinity) {
+      if (deadlines.referenced && !this.destroyed) {
+        referenceDiscoveryDeadlines(this.inFlightAffinity.deadlines);
+      }
+      return;
+    }
+    const promise = this.refreshKeyRouteAffinityHostsOnce(deadlines, datacenterSupport, results).finally(() => {
+      this.inFlightAffinity = undefined;
+    });
+    this.inFlightAffinity = { promise, deadlines };
+    void promise.catch(() => undefined);
+  }
+
+  private async refreshKeyRouteAffinityHostsOnce(
+    deadlines: DiscoveryDeadlineContext,
+    datacenterSupport: RackDatacenterSupport | undefined,
+    results: ReadonlyMap<string, string[]>,
+  ): Promise<void> {
+    for (const scope of this.affinityScopes ?? []) {
+      if (scope.kind === "datacenter" && datacenterSupport === "unsupported") {
+        continue;
+      }
+      try {
+        // Inspect the chain in order even when a later fallback is already cached.
+        const operation = discoveryOperationKey(scope);
+        const nodes = results.get(operation) ?? await this.fetchNodesForScope(scope, deadlines);
+        const normalized = normalizeDiscoveredHosts(nodes);
+        if (normalized.length > 0) {
+          this.keyRouteAffinityHosts = normalized;
+          return;
+        }
+      } catch (error) {
+        this.config.logger.debug?.("alternator discovery: affinity localnodes request failed", {
+          scope: routingScopeLabel(scope),
+          error,
+        });
+      }
+    }
+  }
+
+  private async fetchNodesForScope(
+    scope: AlternatorRoutingScope,
+    deadlines: DiscoveryDeadlineContext,
+    candidates?: readonly string[],
+  ): Promise<string[]> {
+    return scope.kind === "cluster"
+      ? this.fetchClusterLocalNodes(deadlines)
+      : this.fetchFirstAvailableLocalNodes(queryForRoutingScope(scope), candidates, deadlines);
   }
 
   private candidateHosts(): string[] {
@@ -491,6 +578,10 @@ function queryForRoutingScope(scope: AlternatorRoutingScope): LocalNodesQuery {
     case "rack":
       return { dc: scope.datacenter, rack: scope.rack };
   }
+}
+
+function discoveryOperationKey(scope: AlternatorRoutingScope): string {
+  return JSON.stringify([scope.kind === "cluster", queryForRoutingScope(scope)]);
 }
 
 function routingScopeLabel(scope: AlternatorRoutingScope): string {

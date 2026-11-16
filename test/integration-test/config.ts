@@ -31,6 +31,8 @@ export const integrationConfig = {
   httpsPort: intEnv("ALTERNATOR_HTTPS_PORT", 8043),
   datacenter: process.env.ALTERNATOR_DATACENTER ?? "dc1",
   rack: process.env.ALTERNATOR_RACK ?? "RAC1",
+  secondRackHost: optionalNonemptyEnvironmentValue(process.env.ALTERNATOR_SECOND_RACK_HOST),
+  secondRack: optionalNonemptyEnvironmentValue(process.env.ALTERNATOR_SECOND_RACK),
   caCertPath: optionalNonemptyEnvironmentValue(process.env.ALTERNATOR_CA_CERT_PATH),
   resourcePrefix: integrationResourcePrefix(process.env.ALTERNATOR_RESOURCE_PREFIX),
   credentials: {

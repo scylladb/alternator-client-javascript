@@ -33,6 +33,8 @@ const invocationIdHeader = "x-scylladb-alternator-invocation-id";
 
 interface AlternatorInvocationState {
   queryPlan?: AlternatorQueryPlan;
+  affinityOrder?: AlternatorNode[];
+  affinityReplayIndex?: number;
   readonly requests: Set<object>;
 }
 
@@ -193,16 +195,27 @@ function nextNodeForAttempt<Input extends object>(
   keyAffinity: KeyRouteAffinityPlanner,
 ): AlternatorNode | undefined {
   if (!state.queryPlan) {
-    state.queryPlan = createQueryPlan(context, input, discovery, keyAffinity);
+    state.queryPlan = createQueryPlan(state, context, input, discovery, keyAffinity);
   }
 
   const node = state.queryPlan.next();
   if (node) {
+    state.affinityOrder?.push(node);
     return node;
   }
 
-  state.queryPlan = createQueryPlan(context, input, discovery, keyAffinity);
-  return state.queryPlan.next();
+  if (state.affinityOrder?.length) {
+    const index = state.affinityReplayIndex ?? 0;
+    state.affinityReplayIndex = (index + 1) % state.affinityOrder.length;
+    return state.affinityOrder[index];
+  }
+
+  state.queryPlan = createQueryPlan(state, context, input, discovery, keyAffinity);
+  const next = state.queryPlan.next();
+  if (next) {
+    state.affinityOrder?.push(next);
+  }
+  return next;
 }
 
 function invocationState(
@@ -239,13 +252,19 @@ function createInvocationState(): AlternatorInvocationState {
 }
 
 function createQueryPlan<Input extends object>(
+  state: AlternatorInvocationState,
   context: HandlerExecutionContext,
   input: Input,
   discovery: AlternatorDiscovery,
   keyAffinity: KeyRouteAffinityPlanner,
 ): AlternatorQueryPlan {
-  const nodes = discovery.getLiveNodes();
-  return keyAffinity.queryPlanForInput(input, nodes, context.commandName) ?? discovery.createQueryPlan();
+  const nodes = discovery.getKeyRouteAffinityNodes();
+  const affinityPlan = keyAffinity.queryPlanForInput(input, nodes, context.commandName);
+  if (affinityPlan) {
+    state.affinityOrder = [];
+    return affinityPlan;
+  }
+  return discovery.createQueryPlan();
 }
 
 function whitelistHeaders(
